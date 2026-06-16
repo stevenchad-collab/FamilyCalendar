@@ -51,6 +51,10 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
   const [railOpen, setRailOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
 
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.matchMedia("(max-width: 860px)").matches) setMode("list");
+  }, []);
+
   const typeById = useMemo(() => Object.fromEntries(types.map((t) => [t.id, t])), [types]);
   const months = useMemo(() => monthsBetween(cal.rangeStart, cal.rangeEnd), [cal.rangeStart, cal.rangeEnd]);
 

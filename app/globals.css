@@ -209,3 +209,16 @@
 :root{
   --ink:#193b4e;--muted:#6b8595;--line:#e3e9ec;--bg:#eef3f4;--sea:#0f8c8c;--sea-d:#0c7373;
 }
+
+/* mobile month-grid fit */
+.cell{min-width:0;overflow:hidden}
+.cell__top{min-width:0}
+.cell__icons{flex:0 1 auto;min-width:0;overflow:hidden;white-space:nowrap}
+@media (max-width:560px){
+  .grid{gap:4px}
+  .dow{gap:4px}
+  .cell{padding:5px 4px}
+  .cell__icons{font-size:11px;letter-spacing:0}
+  .date{min-width:20px;height:20px;font-size:12.5px}
+  .dow__c{font-size:10px;padding-left:2px}
+}
