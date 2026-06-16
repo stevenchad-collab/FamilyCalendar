@@ -6,6 +6,9 @@ export default async function Home() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
+  // materialize any pending email invites into memberships
+  await supabase.rpc("claim_invites");
+
   const { data: cals } = await supabase
     .from("calendars")
     .select("slug")
@@ -14,7 +17,6 @@ export default async function Home() {
 
   if (cals && cals.length) redirect(`/c/${cals[0].slug}`);
 
-  // No calendars yet — offer to seed the demo.
   return (
     <main style={{ maxWidth: 520, margin: "12vh auto", padding: 24 }}>
       <h1 style={{ fontSize: 30, fontWeight: 800 }}>Welcome 👋</h1>

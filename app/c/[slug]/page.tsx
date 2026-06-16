@@ -8,6 +8,9 @@ export default async function Page({ params }: { params: { slug: string } }) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
+  // turn any pending email invites for this user into memberships
+  await supabase.rpc("claim_invites");
+
   const { data: calRow } = await supabase.from("calendars").select("*").eq("slug", params.slug).single();
   if (!calRow) notFound();
 
@@ -23,6 +26,7 @@ export default async function Page({ params }: { params: { slug: string } }) {
       initialTypes={(typeRows || []).map(rowToType)}
       initialEvents={(eventRows || []).map(rowToEvent)}
       allCalendars={(calList || []).map((c: any) => ({ id: c.id, name: c.name, slug: c.slug }))}
+      userEmail={user.email || ""}
     />
   );
 }

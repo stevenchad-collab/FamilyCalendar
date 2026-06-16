@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -32,9 +32,10 @@ type Props = {
   initialTypes: EventType[];
   initialEvents: UIEvent[];
   allCalendars: { id: string; name: string; slug: string }[];
+  userEmail: string;
 };
 
-export default function CalendarApp({ calendar, initialTypes, initialEvents, allCalendars }: Props) {
+export default function CalendarApp({ calendar, initialTypes, initialEvents, allCalendars, userEmail }: Props) {
   const supabase = useMemo(() => createClient(), []);
   const router = useRouter();
   const cal = calendar;
@@ -138,6 +139,18 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
     setEvents((p) => [...p, ...(data || []).map(rowToEvent)]);
   }
 
+  async function sendInvite(email: string) {
+    const clean = email.trim().toLowerCase();
+    if (!clean) return;
+    const { error } = await supabase.from("calendar_invites").insert({ calendar_id: cal.id, email: clean, role: "editor" });
+    if (error) alert(error.message);
+  }
+  const loadInvites = async () =>
+    (await supabase.from("calendar_invites").select("*").eq("calendar_id", cal.id).order("created_at", { ascending: false })).data || [];
+  const loadLog = async () =>
+    (await supabase.from("audit_log").select("*").eq("calendar_id", cal.id).order("at", { ascending: false }).limit(300)).data || [];
+  const isOwnerAccount = (userEmail || "").toLowerCase() === "stevenchad@gmail.com";
+
   // ---------- derived ----------
   const overlapsRange = (e: UIEvent) => e.end >= filterStart && e.start <= filterEnd;
   const isVisible = (e: UIEvent) => visibleTypes.has(e.typeId) && visibleStatus.has(e.status) && overlapsRange(e);
@@ -227,6 +240,8 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
                 </button>
               ))}
               <button className="menu__new" onClick={() => { setMenuOpen(false); setModal({ kind: "newcal" }); }}>+ New calendar</button>
+              <button className="menu__new" onClick={() => { setMenuOpen(false); setModal({ kind: "invite" }); }}>✉️ Invite family</button>
+              {isOwnerAccount && <button className="menu__new" onClick={() => { setMenuOpen(false); setModal({ kind: "log" }); }}>🕘 Change log</button>}
             </div>
           )}
         </div>
@@ -375,6 +390,12 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
       )}
       {modal?.kind === "newcal" && (
         <NewCalendarModal onClose={() => setModal(null)} onCreate={createCalendar} />
+      )}
+      {modal?.kind === "invite" && (
+        <InviteModal onClose={() => setModal(null)} onInvite={sendInvite} loadInvites={loadInvites} />
+      )}
+      {modal?.kind === "log" && (
+        <ChangeLogModal onClose={() => setModal(null)} loadLog={loadLog} />
       )}
     </div>
   );
@@ -661,6 +682,68 @@ function NewCalendarModal({ onClose, onCreate }: any) {
         <label className="fld"><span>Range end</span><input type="date" min={start} value={end} onChange={(e) => setEnd(e.target.value)} /></label>
       </div>
       <div className="tedit__actions"><span /><div className="row-gap"><button className="btn" onClick={onClose}>Cancel</button><button className="btn btn--primary" onClick={() => name.trim() ? onCreate(name.trim(), start, end < start ? start : end) : alert("Name your calendar.")}>Create calendar</button></div></div>
+    </Overlay>
+  );
+}
+
+/* ---------- Invite family ---------- */
+function InviteModal({ onClose, onInvite, loadInvites }: any) {
+  const [email, setEmail] = useState("");
+  const [rows, setRows] = useState<any[]>([]);
+  const [busy, setBusy] = useState(false);
+  const refresh = async () => setRows(await loadInvites());
+  useEffect(() => { refresh(); }, []);
+  async function add() {
+    if (!email.trim()) return;
+    setBusy(true);
+    await onInvite(email);
+    setEmail("");
+    await refresh();
+    setBusy(false);
+  }
+  return (
+    <Overlay onClose={onClose} title="Invite family">
+      <p className="modal__hint">Enter an email to grant full editor access. Tell them to sign in at this site with that exact email — they&apos;re added automatically the first time they log in.</p>
+      <div className="fld2" style={{ alignItems: "flex-end" }}>
+        <label className="fld"><span>Email</span><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="milsy@example.com" onKeyDown={(e) => { if (e.key === "Enter") add(); }} /></label>
+        <button className="btn btn--primary" onClick={add} disabled={busy || !email.trim()}>Send invite</button>
+      </div>
+      <div className="sec-label">Invited</div>
+      {rows.length === 0 && <div className="empty">No invites yet.</div>}
+      <div className="tmlist">
+        {rows.map((r) => (
+          <div className="tmrow" key={r.id}>
+            <span className="tmrow__name">{r.email}</span>
+            <span className="chip" style={{ background: r.claimed_at ? "#e3f3ec" : "#fdf0e0", color: r.claimed_at ? "#1f7a52" : "#9a6312" }}>{r.claimed_at ? "Joined" : "Pending"}</span>
+          </div>
+        ))}
+      </div>
+    </Overlay>
+  );
+}
+
+/* ---------- Change log (owner only) ---------- */
+function ChangeLogModal({ onClose, loadLog }: any) {
+  const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { (async () => { setRows(await loadLog()); setLoading(false); })(); }, []);
+  const fmt = (s: string) => new Date(s).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const color = (a: string) => a === "delete" ? "#c0392b" : a === "insert" ? "#2c7a7b" : "#8a6d1f";
+  const label = (a: string) => a === "insert" ? "added" : a === "delete" ? "deleted" : "edited";
+  return (
+    <Overlay onClose={onClose} title="Change log" wide>
+      <p className="modal__hint">Every add, edit, and delete to this calendar&apos;s events, newest first. Only your account can see this.</p>
+      {loading && <div className="empty">Loading…</div>}
+      {!loading && rows.length === 0 && <div className="empty">No changes recorded yet.</div>}
+      <div style={{ maxHeight: "55vh", overflow: "auto" }}>
+        {rows.map((r) => (
+          <div key={r.id} style={{ display: "flex", gap: 10, alignItems: "baseline", padding: "9px 4px", borderBottom: "1px solid var(--line)", fontSize: 13 }}>
+            <span style={{ textTransform: "uppercase", fontSize: 10, fontWeight: 800, letterSpacing: ".05em", color: color(r.action), minWidth: 52 }}>{label(r.action)}</span>
+            <span style={{ flex: 1, fontWeight: 600 }}>{r.summary}</span>
+            <span style={{ color: "var(--muted)", fontSize: 11, whiteSpace: "nowrap" }}>{r.actor_email || "system"} · {fmt(r.at)}</span>
+          </div>
+        ))}
+      </div>
     </Overlay>
   );
 }
