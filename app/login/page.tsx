@@ -1,23 +1,32 @@
 "use client";
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 
 export default function Login() {
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const sending = useRef(false);
 
   async function send() {
-    if (!email) return;
+    if (!email || sending.current) return;   // guard: one send at a time
+    sending.current = true;
+    setBusy(true);
     setErr("");
-    const supabase = createClient();
-    const site = process.env.NEXT_PUBLIC_SITE_URL || window.location.origin;
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: `${site}/auth/callback` },
-    });
-    if (error) setErr(error.message);
-    else setSent(true);
+    try {
+      const supabase = createClient();
+      const site = process.env.NEXT_PUBLIC_SITE_URL || window.location.origin;
+      const { error } = await supabase.auth.signInWithOtp({
+        email,
+        options: { emailRedirectTo: `${site}/auth/callback` },
+      });
+      if (error) setErr(error.message);
+      else setSent(true);
+    } finally {
+      sending.current = false;
+      setBusy(false);
+    }
   }
 
   return (
@@ -38,9 +47,10 @@ export default function Login() {
           />
           <button
             onClick={send}
-            style={{ marginTop: 12, width: "100%", padding: "12px 16px", background: "#2c7a7b", color: "#fff", border: "none", borderRadius: 10, fontSize: 15, fontWeight: 600, cursor: "pointer" }}
+            disabled={busy || !email}
+            style={{ marginTop: 12, width: "100%", padding: "12px 16px", background: "#2c7a7b", color: "#fff", border: "none", borderRadius: 10, fontSize: 15, fontWeight: 600, cursor: "pointer", opacity: busy ? 0.7 : 1 }}
           >
-            Send magic link
+            {busy ? "Sending…" : "Send magic link"}
           </button>
           {err && <p style={{ color: "#c0392b", marginTop: 10 }}>{err}</p>}
         </div>
