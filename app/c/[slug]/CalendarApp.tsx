@@ -154,6 +154,7 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
   const loadLog = async () =>
     (await supabase.from("audit_log").select("*").eq("calendar_id", cal.id).order("at", { ascending: false }).limit(300)).data || [];
   const isOwnerAccount = (userEmail || "").toLowerCase() === "stevenchad@gmail.com";
+  async function signOut() { await supabase.auth.signOut(); window.location.href = "/login"; }
 
   // ---------- derived ----------
   const overlapsRange = (e: UIEvent) => e.end >= filterStart && e.start <= filterEnd;
@@ -246,6 +247,7 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
               <button className="menu__new" onClick={() => { setMenuOpen(false); setModal({ kind: "newcal" }); }}>+ New calendar</button>
               <button className="menu__new" onClick={() => { setMenuOpen(false); setModal({ kind: "invite" }); }}>✉️ Invite family</button>
               {isOwnerAccount && <button className="menu__new" onClick={() => { setMenuOpen(false); setModal({ kind: "log" }); }}>🕘 Change log</button>}
+              <button className="menu__new" onClick={signOut}>🚪 Sign out{userEmail ? ` (${userEmail})` : ""}</button>
             </div>
           )}
         </div>
