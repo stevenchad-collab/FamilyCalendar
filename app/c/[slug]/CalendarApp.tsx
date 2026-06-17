@@ -208,7 +208,7 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
         <button key={dayIso} className="cell" title={daySummary} onClick={() => setModal({ kind: "day", day: dayIso })}>
           <div className="cell__top">
             <span className={"date" + (isToday ? " date--today" : "")} style={hlColor ? { background: hlColor, color: "#1f3b2c" } : undefined} title={hl ? (titlesFor(hl.typeId) || typeById[hl.typeId].name) : undefined}>{d}</span>
-            <span className="cell__icons" style={{ display: "inline-flex", gap: 2 }}>{iconTypes.slice(0, 2).map((t) => <span key={t.id} title={titlesFor(t.id) || t.name}>{t.icon}</span>)}</span>
+            <span className="cell__icons" style={{ display: "inline-flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 2, flex: "1 1 auto", minWidth: 0, whiteSpace: "normal", overflow: "visible" }}>{iconTypes.map((t) => <span key={t.id} title={titlesFor(t.id) || t.name}>{t.icon}</span>)}</span>
           </div>
           <div className="bars">
             {bars.slice(0, 4).map((t) => <span key={t.id} className="bar" style={{ background: t.color }} title={titlesFor(t.id) || t.name} />)}

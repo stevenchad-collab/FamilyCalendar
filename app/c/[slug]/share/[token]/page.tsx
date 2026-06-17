@@ -33,11 +33,11 @@ export default async function SharePage({ params }: { params: { slug: string; to
               const evs = onDay(di);
               const hl = evs.find((e: any) => typeById[e.typeId]?.highlight);
               const hlColor = hl ? typeById[hl.typeId].color : null;
-              const icons = Array.from(new Set(evs.map((e: any) => typeById[e.typeId]?.icon).filter(Boolean))).slice(0, 2);
-              const bars = Array.from(new Set(evs.map((e: any) => e.typeId))).map((id: any) => typeById[id]).slice(0, 4);
+              const icons = Array.from(new Set(evs.map((e: any) => typeById[e.typeId]?.icon).filter(Boolean)));
+              const bars = Array.from(new Set(evs.map((e: any) => e.typeId))).map((id: any) => typeById[id]).filter((t: any) => t && !t.icon).slice(0, 4);
               return (
                 <div key={di} className="cell">
-                  <div className="cell__top"><span className="date" style={hlColor ? { background: hlColor, color: "#1f3b2c" } : undefined}>{d}</span><span className="cell__icons">{icons.join(" ")}</span></div>
+                  <div className="cell__top"><span className="date" style={hlColor ? { background: hlColor, color: "#1f3b2c" } : undefined}>{d}</span><span className="cell__icons" style={{ display: "inline-flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 2, flex: "1 1 auto", minWidth: 0, whiteSpace: "normal", overflow: "visible" }}>{icons.map((ic: any, i: number) => <span key={i}>{ic}</span>)}</span></div>
                   <div className="bars">{bars.map((t: any, i: number) => <span key={i} className="bar" style={{ background: t.color }} />)}</div>
                 </div>
               );
