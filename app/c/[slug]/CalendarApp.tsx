@@ -50,6 +50,7 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
   const [modal, setModal] = useState<any>(null);
   const [railOpen, setRailOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [showPast, setShowPast] = useState(false);
 
   useEffect(() => {
     if (typeof window !== "undefined" && window.matchMedia("(max-width: 860px)").matches) setMode("list");
@@ -57,6 +58,13 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
 
   const typeById = useMemo(() => Object.fromEntries(types.map((t) => [t.id, t])), [types]);
   const months = useMemo(() => monthsBetween(cal.rangeStart, cal.rangeEnd), [cal.rangeStart, cal.rangeEnd]);
+
+  const didScrollToToday = React.useRef(false);
+  useEffect(() => {
+    if (didScrollToToday.current || mode !== "month") return;
+    const el = document.getElementById("today-cell");
+    if (el) { el.scrollIntoView({ behavior: "auto", block: "center" }); didScrollToToday.current = true; }
+  }, [mode, months]);
 
   // ---------- persistence ----------
   async function saveEvent(ui: UIEvent) {
@@ -206,7 +214,7 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
       for (const e of evs) { const t = typeById[e.typeId]; if (!t || t.icon) continue; if (seenB.has(e.typeId)) continue; seenB.add(e.typeId); bars.push(t); }
       const isToday = dayIso === TODAY;
       cells.push(
-        <button key={dayIso} className="cell" title={daySummary} onClick={() => setModal({ kind: "day", day: dayIso })}>
+        <button key={dayIso} id={isToday ? "today-cell" : undefined} className={"cell" + (dayIso < TODAY ? " cell--past" : "")} style={dayIso < TODAY ? { opacity: 0.5 } : undefined} title={daySummary} onClick={() => setModal({ kind: "day", day: dayIso })}>
           <div className="cell__top">
             <span className={"date" + (isToday ? " date--today" : "")} style={hlColor ? { background: hlColor, color: "#1f3b2c" } : undefined} title={hl ? (titlesFor(hl.typeId) || typeById[hl.typeId].name) : undefined}>{d}</span>
             <span className="cell__icons" style={{ display: "inline-flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 2, flex: "1 1 auto", minWidth: 0, whiteSpace: "normal", overflow: "visible" }}>{iconTypes.map((t) => <span key={t.id} title={titlesFor(t.id) || t.name}>{t.icon}</span>)}</span>
@@ -336,32 +344,46 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
               </div>
             </>
           )}
-          {mode === "list" && (
-            <div className="list">
-              <h1 className="monthname">Agenda</h1>
-              {listGroups.length === 0 && <div className="empty">Nothing matches these filters.</div>}
-              {listGroups.map(([day, evs]) => (
-                <div className="lgroup" key={day}>
-                  <div className="lgroup__date">{fmtDate(day)}</div>
-                  <div className="lgroup__items">
-                    {evs.map(({ e, dayNum, span }) => {
-                      const t = typeById[e.typeId];
-                      return (
-                        <button className="litem" key={e.id} onClick={() => setModal({ kind: "event", event: e })}>
-                          <span className="litem__sw" style={{ background: t.color }} />
-                          <span className="litem__icon">{t.icon}</span>
-                          <span className="litem__title">{e.title}{span > 1 && dayNum > 1 && <span className="litem__day"> (Day {dayNum} of {span})</span>}{e.imported && <span className="lock">🔒</span>}</span>
-                          {e.time && <span className="litem__time">{e.time}</span>}
-                          {statusChip(e.status)}
-                          {e.note && <span className="litem__note">{e.note}</span>}
-                        </button>
-                      );
-                    })}
-                  </div>
+          {mode === "list" && (() => {
+            const renderGroup = ([day, evs]: [string, any[]]) => (
+              <div className="lgroup" key={day}>
+                <div className="lgroup__date">{fmtDate(day)}</div>
+                <div className="lgroup__items">
+                  {evs.map(({ e, dayNum, span }: any) => {
+                    const t = typeById[e.typeId];
+                    return (
+                      <button className="litem" key={e.id} onClick={() => setModal({ kind: "event", event: e })}>
+                        <span className="litem__sw" style={{ background: t.color }} />
+                        <span className="litem__icon">{t.icon}</span>
+                        <span className="litem__title">{e.title}{span > 1 && dayNum > 1 && <span className="litem__day"> (Day {dayNum} of {span})</span>}{e.imported && <span className="lock">🔒</span>}</span>
+                        {e.time && <span className="litem__time">{e.time}</span>}
+                        {statusChip(e.status)}
+                        {e.note && <span className="litem__note">{e.note}</span>}
+                      </button>
+                    );
+                  })}
                 </div>
-              ))}
-            </div>
-          )}
+              </div>
+            );
+            const past = listGroups.filter(([day]) => day < TODAY);
+            const future = listGroups.filter(([day]) => day >= TODAY);
+            return (
+              <div className="list">
+                <h1 className="monthname">Agenda</h1>
+                {listGroups.length === 0 && <div className="empty">Nothing matches these filters.</div>}
+                {past.length > 0 && (
+                  <button className="lpast-toggle" onClick={() => setShowPast((v) => !v)}>
+                    {showPast ? "▾ Hide" : "▸ Show"} {past.length} earlier day{past.length === 1 ? "" : "s"}
+                  </button>
+                )}
+                {showPast && past.map(renderGroup)}
+                {future.map(renderGroup)}
+                {future.length === 0 && past.length > 0 && !showPast && (
+                  <div className="empty">Nothing upcoming. Tap above to see earlier days.</div>
+                )}
+              </div>
+            );
+          })()}
         </main>
       </div>
 
