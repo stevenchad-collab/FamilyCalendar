@@ -222,9 +222,25 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
   }
 
   const listGroups = useMemo(() => {
-    const vis = events.filter(isVisible).sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
-    const g: Record<string, UIEvent[]> = {}; for (const e of vis) (g[e.start] = g[e.start] || []).push(e);
-    return Object.entries(g);
+    const vis = events.filter(isVisible).sort((a, b) =>
+      a.start !== b.start ? (a.start < b.start ? -1 : 1)
+        : (a.time || "") < (b.time || "") ? -1 : (a.time || "") > (b.time || "") ? 1 : 0
+    );
+    const dayDiff = (a: string, b: string) =>
+      Math.round((new Date(b + "T00:00:00").getTime() - new Date(a + "T00:00:00").getTime()) / 86400000);
+    const g: Record<string, { e: UIEvent; dayNum: number; span: number }[]> = {};
+    for (const e of vis) {
+      const span = dayDiff(e.start, e.end) + 1;
+      const from = e.start < filterStart ? filterStart : e.start;
+      const to = e.end > filterEnd ? filterEnd : e.end;
+      let cur = from;
+      while (cur <= to) {
+        const dayNum = dayDiff(e.start, cur) + 1;
+        (g[cur] = g[cur] || []).push({ e, dayNum, span });
+        cur = addDays(cur, 1);
+      }
+    }
+    return Object.entries(g).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   }, [events, visibleTypes, visibleStatus, filterStart, filterEnd]);
 
   return (
@@ -328,13 +344,13 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
                 <div className="lgroup" key={day}>
                   <div className="lgroup__date">{fmtDate(day)}</div>
                   <div className="lgroup__items">
-                    {evs.map((e) => {
+                    {evs.map(({ e, dayNum, span }) => {
                       const t = typeById[e.typeId];
                       return (
                         <button className="litem" key={e.id} onClick={() => setModal({ kind: "event", event: e })}>
                           <span className="litem__sw" style={{ background: t.color }} />
                           <span className="litem__icon">{t.icon}</span>
-                          <span className="litem__title">{e.title}{e.imported && <span className="lock">🔒</span>}</span>
+                          <span className="litem__title">{e.title}{span > 1 && dayNum > 1 && <span className="litem__day"> (Day {dayNum} of {span})</span>}{e.imported && <span className="lock">🔒</span>}</span>
                           {e.time && <span className="litem__time">{e.time}</span>}
                           {statusChip(e.status)}
                           {e.note && <span className="litem__note">{e.note}</span>}
