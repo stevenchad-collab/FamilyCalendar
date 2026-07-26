@@ -189,6 +189,7 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
   }
   const scrollToMonth = (key: string) => { const el = document.getElementById("m-" + key); if (el) el.scrollIntoView({ behavior: "smooth", block: "start" }); };
   const fmtDate = (s: string) => { const [, m, d] = s.split("-").map(Number); return `${MONTH_NAMES[m - 1].slice(0, 3)} ${d}`; };
+  const dowShort = (s: string) => { const [y, m, d] = s.split("-").map(Number); return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(Date.UTC(y, m - 1, d)).getUTCDay()]; };
   const statusChip = (s: string) => s === "confirmed" ? null : <span className={"sc sc--" + s}>{STATUSES.find((x) => x.id === s)?.label}</span>;
   const visibleCount = events.filter(isVisible).length;
 
@@ -347,7 +348,7 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
           {mode === "list" && (() => {
             const renderGroup = ([day, evs]: [string, any[]]) => (
               <div className="lgroup" key={day}>
-                <div className="lgroup__date">{fmtDate(day)}</div>
+                <div className="lgroup__date">{dowShort(day)}, {fmtDate(day)}</div>
                 <div className="lgroup__items">
                   {evs.map(({ e, dayNum, span }: any) => {
                     const t = typeById[e.typeId];
