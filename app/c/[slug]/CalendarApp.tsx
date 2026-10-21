@@ -31,7 +31,7 @@ type Props = {
   calendar: Calendar;
   initialTypes: EventType[];
   initialEvents: UIEvent[];
-  allCalendars: { id: string; name: string; slug: string }[];
+  allCalendars: { id: string; name: string; slug: string; kind?: string }[];
   userEmail: string;
 };
 
@@ -265,7 +265,7 @@ export default function CalendarApp({ calendar, initialTypes, initialEvents, all
             <div className="menu" onMouseLeave={() => setMenuOpen(false)}>
               <div className="menu__label">Your calendars</div>
               {allCalendars.map((c) => (
-                <button key={c.id} className={"menu__item" + (c.slug === cal.slug ? " is-on" : "")} onClick={() => router.push(`/c/${c.slug}`)}>
+                <button key={c.id} className={"menu__item" + (c.slug === cal.slug ? " is-on" : "")} onClick={() => router.push(c.kind === "plan" ? `/plan/${c.slug}` : `/c/${c.slug}`)}>
                   <span>{c.name}</span><span className="menu__url">/{c.slug}</span>
                 </button>
               ))}
