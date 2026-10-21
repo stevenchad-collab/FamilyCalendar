@@ -13,11 +13,12 @@ export default async function Page({ params }: { params: { slug: string } }) {
 
   const { data: calRow } = await supabase.from("calendars").select("*").eq("slug", params.slug).single();
   if (!calRow) notFound();
+  if (calRow.kind === "plan") redirect(`/plan/${calRow.slug}`);
 
   const [{ data: typeRows }, { data: eventRows }, { data: calList }] = await Promise.all([
     supabase.from("event_types").select("*").eq("calendar_id", calRow.id).order("sort_order"),
     supabase.from("events").select("*").eq("calendar_id", calRow.id),
-    supabase.from("calendars").select("id,name,slug").order("created_at"),
+    supabase.from("calendars").select("id,name,slug,kind").order("created_at"),
   ]);
 
   return (
@@ -25,7 +26,7 @@ export default async function Page({ params }: { params: { slug: string } }) {
       calendar={rowToCalendar(calRow)}
       initialTypes={(typeRows || []).map(rowToType)}
       initialEvents={(eventRows || []).map(rowToEvent)}
-      allCalendars={(calList || []).map((c: any) => ({ id: c.id, name: c.name, slug: c.slug }))}
+      allCalendars={(calList || []).map((c: any) => ({ id: c.id, name: c.name, slug: c.slug, kind: c.kind || "events" }))}
       userEmail={user.email || ""}
     />
   );

@@ -51,3 +51,6 @@ See `.env.example`. `SUPABASE_SERVICE_ROLE_KEY` and `CRON_SECRET` are server-onl
 - **Image export (JPEG/PNG):** add `html-to-image` and capture the calendar node; PDF already works via the browser print dialog.
 - **Inviting family members:** insert rows into `calendar_members` (a simple invite-by-email UI is a good follow-on).
 # FamilyCalendar
+
+## 2027 residency plan (`/plan/steve-2027`)
+A second kind of calendar (`calendars.kind = 'plan'`) for Steve's 2027 US/Spain/Europe day plan: colored year view with school-holiday stars, with-Milsy / with-Mason views, transatlantic flights, and an editable date-range table. The plan built in chat lives in `lib/plan2027.ts`; edits are rows in `plan_days`. Membership, invites and roles reuse `calendar_members` / `calendar_invites`: owner and `editor` members edit, `viewer` members see the live plan. Owner can set roles in the **Invite & permissions** menu. Apply `supabase/migrations/0002_plan_days.sql` before first use; the calendar and Steve's edits are created on the owner's first visit.
