@@ -1,5 +1,5 @@
 import { redirect, notFound } from "next/navigation";
-import { createServerSupabase } from "@/lib/supabase/server";
+import { createServerSupabase, createServiceClient } from "@/lib/supabase/server";
 import { SEED } from "@/lib/plan2027";
 import PlanApp, { type PlanRow } from "./PlanApp";
 import "../plan.css";
@@ -17,16 +17,20 @@ export default async function Page({ params }: { params: { slug: string } }) {
 
   // First visit by the owner: create the plan calendar and load Steve's edits once.
   if (!cal && params.slug === DEFAULT_SLUG && (user.email || "").toLowerCase() === OWNER_EMAIL) {
-    const { data: created, error } = await supabase
+    // one-time setup runs with the service role (server only): RLS blocks a server-side insert+read
+    const admin = createServiceClient();
+    const { data: created, error } = await admin
       .from("calendars")
       .insert({ owner_id: user.id, name: "Steve's 2027", slug: DEFAULT_SLUG, range_start: "2027-01-01", range_end: "2027-12-31", kind: "plan" })
       .select().single();
     if (error || !created) throw new Error(error?.message || "could not create plan calendar");
-    await supabase.from("calendar_members").insert({ calendar_id: created.id, user_id: user.id, role: "owner" });
+    const { error: mErr } = await admin.from("calendar_members").insert({ calendar_id: created.id, user_id: user.id, role: "owner" });
+    if (mErr) throw new Error(mErr.message);
     if (SEED.length) {
-      await supabase.from("plan_days").insert(SEED.map((s) => ({
+      const { error: sErr } = await admin.from("plan_days").insert(SEED.map((s) => ({
         calendar_id: created.id, day: s.day, loc: s.loc ?? null, note: s.note ?? null, fam: s.fam ?? null, mi: s.mi ?? null, updated_by: user.id,
       })));
+      if (sErr) throw new Error(sErr.message);
     }
     cal = created;
   }
