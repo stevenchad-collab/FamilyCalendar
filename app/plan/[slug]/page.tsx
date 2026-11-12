@@ -1,7 +1,7 @@
 import { redirect, notFound } from "next/navigation";
 import { createServerSupabase, createServiceClient } from "@/lib/supabase/server";
 import { SEED } from "@/lib/plan2027";
-import PlanApp, { type PlanRow } from "./PlanApp";
+import PlanApp, { type PlanRow, type Category } from "./PlanApp";
 import "../plan.css";
 
 const OWNER_EMAIL = "stevenchad@gmail.com";
@@ -37,10 +37,11 @@ export default async function Page({ params }: { params: { slug: string } }) {
   if (!cal) notFound();
   if (cal.kind !== "plan") redirect(`/c/${cal.slug}`);
 
-  const [{ data: member }, { data: rows }, { data: calList }] = await Promise.all([
+  const [{ data: member }, { data: rows }, { data: calList }, { data: catRows }] = await Promise.all([
     supabase.from("calendar_members").select("role").eq("calendar_id", cal.id).eq("user_id", user.id).maybeSingle(),
-    supabase.from("plan_days").select("day,loc,note,fam,mi").eq("calendar_id", cal.id),
+    supabase.from("plan_days").select("day,loc,note,fam,mi,cats").eq("calendar_id", cal.id),
     supabase.from("calendars").select("id,name,slug,kind").order("created_at"),
+    supabase.from("plan_categories").select("id,name,icon,color,sort").eq("calendar_id", cal.id).order("sort").order("created_at"),
   ]);
   const role = (member?.role as "owner" | "editor" | "viewer" | undefined) || "viewer";
 
@@ -49,6 +50,7 @@ export default async function Page({ params }: { params: { slug: string } }) {
       calendar={{ id: cal.id, name: cal.name, slug: cal.slug, ownerId: cal.owner_id }}
       role={role}
       initialRows={(rows || []) as PlanRow[]}
+      initialCategories={(catRows || []) as Category[]}
       allCalendars={(calList || []).map((c: any) => ({ id: c.id, name: c.name, slug: c.slug, kind: c.kind || "events" }))}
       userEmail={user.email || ""}
       userId={user.id}
