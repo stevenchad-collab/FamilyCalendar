@@ -235,6 +235,17 @@ export default function PlanApp({ calendar, role, people, initialDays, initialEv
     }
     writeDays(changes);
   };
+  // put the selected people wherever Steve is on each selected day
+  const applyWithMe = () => {
+    if (!range) return;
+    const changes: Parameters<typeof writeDays>[0] = [];
+    for (const p of others.filter((x) => selPeople.has(x.id))) for (const d of range.days) {
+      const s = S[DAY_INDEX[d]];
+      const isDefault = !!p.default_place && norm(p.default_place) === norm(s.place);
+      changes.push({ person_id: p.id, day: d, row: isDefault ? null : { place: s.place, loc: s.loc, note: null } });
+    }
+    writeDays(changes);
+  };
   const clearSel = () => {
     if (!range) return;
     const changes: Parameters<typeof writeDays>[0] = [];
@@ -430,10 +441,16 @@ export default function PlanApp({ calendar, role, people, initialDays, initialEv
           {canWrite && <>
             <div className="row">
               <span className="lbl">Who</span>
+              <span className="meta">pick who, then click where they are:</span>
               {people.map((p) => <button key={p.id} className="locbtn who" style={{ ["--c" as any]: "var(--ink)" }} aria-pressed={selPeople.has(p.id)} onClick={() => setSelPeople((s) => { const n = new Set(s); if (n.has(p.id)) n.delete(p.id); else n.add(p.id); return n; })}><i className="pdot" style={{ background: p.color }} />{p.name}</button>)}
             </div>
             <div className="row">
               <span className="lbl">Where</span>
+              {others.some((p) => selPeople.has(p.id)) && (() => {
+                const sel = others.filter((p) => selPeople.has(p.id));
+                const on = sel.every((p) => range.days.every((d) => tog[p.id][DAY_INDEX[d]]));
+                return <button className="locbtn" style={{ ["--c" as any]: "var(--ink)" }} aria-pressed={on} onClick={applyWithMe}>{on ? "✓ " : ""}With me (same place as Steve)</button>;
+              })()}
               {places.map((pl) => {
                 const on = selPeople.size > 0 && people.filter((p) => selPeople.has(p.id)).every((p) => range.days.every((d) => norm(whereIs(p, d, pd)?.place) === norm(pl.place)));
                 return <button key={pl.place} className="locbtn" style={{ ["--c" as any]: LOC[pl.loc].c }} aria-pressed={on} disabled={!selPeople.size} onClick={() => applyPlace(pl.place, pl.loc)}><i className="sw" style={{ background: LOC[pl.loc].c }} />{pl.place}</button>;
