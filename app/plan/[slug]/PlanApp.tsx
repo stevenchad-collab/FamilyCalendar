@@ -2,19 +2,20 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { BASE, SCHOOL_OFF, type Loc } from "@/lib/plan2027";
+import {
+  DAYS, DAY_INDEX, BASE_PLACES, key, norm, whereIs, compute, together, buildChecks, eventPlace, fmt, fmtRange,
+  type Loc, type Person, type PDay, type PlanEvent, type Category, type SDay,
+} from "@/lib/plan";
 
-export type PlanRow = { day: string; loc: Loc | null; note: string | null; fam: boolean | null; mi: boolean | null; cats?: string[] | null };
-export type Category = { id: string; name: string; icon: string; color: string; sort: number };
-type Override = { loc?: Loc; n?: string; fam?: boolean; mi?: boolean; cats?: string[] };
-type Overrides = Record<string, Override>;
 type Role = "owner" | "editor" | "viewer";
-type View = "loc" | "mi" | "ma" | "fl" | "act" | "rng";
+type View = "year" | "time" | "stays" | "events";
 
 type Props = {
   calendar: { id: string; name: string; slug: string; ownerId: string };
   role: Role;
-  initialRows: PlanRow[];
+  people: Person[];
+  initialDays: PDay[];
+  initialEvents: PlanEvent[];
   initialCategories: Category[];
   allCalendars: { id: string; name: string; slug: string; kind: string }[];
   userEmail: string;
@@ -22,85 +23,56 @@ type Props = {
 };
 
 const LOC: Record<Loc, { name: string; c: string }> = {
-  US: { name: "USA (Miami)", c: "var(--p-us)" },
+  US: { name: "USA", c: "var(--p-us)" },
   ES: { name: "Spain", c: "var(--p-es)" },
-  EU: { name: "Europe (not Spain)", c: "var(--p-eu)" },
+  EU: { name: "Rest of world", c: "var(--p-eu)" },
 };
 const MN = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const VIEWS: { id: View; name: string }[] = [
-  { id: "loc", name: "Where I am" }, { id: "mi", name: "With Milsy" }, { id: "ma", name: "With Mason" },
-  { id: "fl", name: "Transatlantic flights" }, { id: "act", name: "Activities" }, { id: "rng", name: "Date ranges" },
+  { id: "year", name: "Year" }, { id: "time", name: "Timeline" }, { id: "stays", name: "Stays" }, { id: "events", name: "Events" },
 ];
+const DOW = ["S", "M", "T", "W", "T", "F", "S"];
+const EV_SELECT = "id,title,start_day,end_day,place,category_id,must,note";
+const CAT_SELECT = "id,name,icon,color,sort,place";
 
-function rowsToOverrides(rows: PlanRow[]): Overrides {
-  const o: Overrides = {};
-  for (const r of rows) {
-    const v: Override = {};
-    if (r.loc) v.loc = r.loc;
-    if (r.note !== null && r.note !== undefined) v.n = r.note;
-    if (r.fam !== null && r.fam !== undefined) v.fam = r.fam;
-    if (r.mi !== null && r.mi !== undefined) v.mi = r.mi;
-    if (r.cats && r.cats.length) v.cats = r.cats;
-    o[r.day] = v;
-  }
-  return o;
-}
-// "edited" = changed vs Claude's plan (location/note/flags); categories are tracked separately
-const planEdited = (o?: Override) => !!o && (o.loc !== undefined || o.n !== undefined || o.fam !== undefined || o.mi !== undefined);
-const isEmptyOv = (o: Override) => !planEdited(o) && !(o.cats && o.cats.length);
-
-type Day = { d: string; loc: Loc; n: string; edited: boolean; us: number; es: number; eu: number; eur: number; off: string; fam: number; mi: number; fl: "" | "E" | "W"; prev: Loc | null; cats: string[] };
-
-function compute(overrides: Overrides): Day[] {
-  let prev: Loc = "EU"; // Dec 31 2026: drive to the Pyrenees
-  const out: Day[] = [];
-  BASE.forEach((b, i) => {
-    const o = overrides[b.d] || {};
-    const loc: Loc = o.loc || b.loc;
-    const n = o.n !== undefined ? o.n : b.n;
-    const counts = new Set<Loc>([loc]);
-    let fl: "" | "E" | "W" = "";
-    if (loc !== prev) {
-      if (prev === "US") { if (i > 0) out[i - 1].fl = "E"; }
-      else { counts.add(prev); if (loc === "US") fl = "W"; }
-    }
-    if (i === 0) { counts.clear(); counts.add(loc); }
-    const us = counts.has("US") ? 1 : 0, es = counts.has("ES") ? 1 : 0, eu = counts.has("EU") ? 1 : 0;
-    const eur = es || eu ? 1 : 0;
-    const off = SCHOOL_OFF[b.d] || "";
-    const famD = es === 1 || (eur === 1 && !!off) || /Philadelphia/i.test(n);
-    const fam = o.fam !== undefined ? o.fam : famD;
-    const mi = o.mi !== undefined ? o.mi : fam;
-    out.push({ d: b.d, loc, n, edited: planEdited(overrides[b.d]), cats: o.cats || [], us, es, eu, eur, off, fam: fam ? 1 : 0, mi: mi ? 1 : 0, fl, prev: i === 0 ? null : prev });
-    prev = loc;
-  });
-  return out;
-}
-
-function fmt(d: string, long = false) {
-  return new Date(d + "T12:00:00").toLocaleDateString("en-GB", long ? { weekday: "long", day: "numeric", month: "long" } : { weekday: "short", day: "numeric", month: "short" });
-}
-
-export default function PlanApp({ calendar, role, initialRows, initialCategories, allCalendars, userEmail, userId }: Props) {
+export default function PlanApp({ calendar, role, people, initialDays, initialEvents, initialCategories, allCalendars, userEmail, userId }: Props) {
   const supabase = useMemo(() => createClient(), []);
   const router = useRouter();
   const canWrite = role === "owner" || role === "editor";
   const isOwner = role === "owner";
+  const self = useMemo(() => people.find((p) => p.is_self), [people]);
+  const others = useMemo(() => people.filter((p) => !p.is_self), [people]);
 
-  const [overrides, setOverrides] = useState<Overrides>(() => rowsToOverrides(initialRows));
-  const [view, setView] = useState<View>("loc");
-  const [sel, setSel] = useState<string | null>(null);
+  const [pd, setPd] = useState<Map<string, PDay>>(() => new Map(initialDays.map((r) => [key(r.person_id, r.day), r])));
+  const [events, setEvents] = useState<PlanEvent[]>(initialEvents);
+  const [cats, setCats] = useState<Category[]>(initialCategories);
+  const [view, setView] = useState<View>("year");
+  const [layers, setLayers] = useState<Set<string>>(() => new Set(["hol", "ev", ...people.filter((p) => !p.is_self && p.default_place).map((p) => p.id)]));
+  const [selA, setSelA] = useState<string | null>(null);
+  const [selB, setSelB] = useState<string | null>(null);
+  const [selPeople, setSelPeople] = useState<Set<string>>(() => new Set(self ? [self.id] : []));
+  const [noteDraft, setNoteDraft] = useState("");
+  const [other, setOther] = useState<string | null>(null);
+  const [staysPerson, setStaysPerson] = useState<string>(self?.id || "");
+  const [evEdit, setEvEdit] = useState<PlanEvent | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [members, setMembers] = useState(false);
-  const [status, setStatus] = useState<{ text: string; kind: "ok" | "busy" | "err" }>({ text: "", kind: "ok" });
-  const [armReset, setArmReset] = useState(false);
-  const [cats, setCats] = useState<Category[]>(initialCategories);
   const [catsOpen, setCatsOpen] = useState(false);
-  const [multi, setMulti] = useState(false);
-  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [status, setStatus] = useState<{ text: string; kind: "ok" | "busy" | "err" }>({ text: "", kind: "ok" });
+  const dragging = useRef(false);
 
-  // ---- persistence: coalesce edits, write only changed days ----
-  const pending = useRef<Map<string, Override | null>>(new Map());
+  // remember layer choices per browser
+  useEffect(() => {
+    try { const s = localStorage.getItem("plan-layers:" + calendar.id); if (s) setLayers(new Set(JSON.parse(s))); } catch {}
+  }, [calendar.id]);
+  const toggleLayer = (id: string) => setLayers((p) => {
+    const n = new Set(p); if (n.has(id)) n.delete(id); else n.add(id);
+    try { localStorage.setItem("plan-layers:" + calendar.id, JSON.stringify(Array.from(n))); } catch {}
+    return n;
+  });
+
+  // ---- persistence: coalesce edits, write only changed person-days ----
+  const pending = useRef<Map<string, PDay | { del: true; person_id: string; day: string }>>(new Map());
   const timer = useRef<any>(null);
   const saving = useRef(false);
 
@@ -109,14 +81,21 @@ export default function PlanApp({ calendar, role, initialRows, initialCategories
     if (pending.current.size === 0) return;
     const batch = new Map(pending.current); pending.current = new Map();
     saving.current = true; setStatus({ text: "Saving…", kind: "busy" });
-    const upserts: any[] = [], deletes: string[] = [];
-    batch.forEach((v, day) => {
-      if (v === null) deletes.push(day);
-      else upserts.push({ calendar_id: calendar.id, day, loc: v.loc ?? null, note: v.n ?? null, fam: v.fam ?? null, mi: v.mi ?? null, cats: v.cats && v.cats.length ? v.cats : null, updated_at: new Date().toISOString(), updated_by: userId });
+    const upserts: any[] = []; const dels: Record<string, string[]> = {};
+    batch.forEach((v) => {
+      if ("del" in v) (dels[v.person_id] = dels[v.person_id] || []).push(v.day);
+      else upserts.push({ calendar_id: calendar.id, person_id: v.person_id, day: v.day, place: v.place, loc: v.loc, note: v.note, updated_at: new Date().toISOString(), updated_by: userId });
     });
     let err: string | null = null;
-    if (upserts.length) { const { error } = await supabase.from("plan_days").upsert(upserts, { onConflict: "calendar_id,day" }); if (error) err = error.message; }
-    if (!err && deletes.length) { const { error } = await supabase.from("plan_days").delete().eq("calendar_id", calendar.id).in("day", deletes); if (error) err = error.message; }
+    for (let i = 0; i < upserts.length && !err; i += 400) {
+      const { error } = await supabase.from("plan_person_days").upsert(upserts.slice(i, i + 400), { onConflict: "person_id,day" });
+      if (error) err = error.message;
+    }
+    for (const pid of Object.keys(dels)) {
+      if (err) break;
+      const { error } = await supabase.from("plan_person_days").delete().eq("person_id", pid).in("day", dels[pid]);
+      if (error) err = error.message;
+    }
     saving.current = false;
     if (err) {
       batch.forEach((v, k) => { if (!pending.current.has(k)) pending.current.set(k, v); });
@@ -128,16 +107,15 @@ export default function PlanApp({ calendar, role, initialRows, initialCategories
 
   const schedule = useCallback(() => { clearTimeout(timer.current); timer.current = setTimeout(flush, 900); setStatus({ text: "Unsaved changes…", kind: "busy" }); }, [flush]);
 
-  const edit = useCallback((days: string[], patch: Override | null) => {
-    if (!canWrite) return;
-    setOverrides((prev) => {
-      const next = { ...prev };
-      for (const d of days) {
-        // reset (patch === null) clears plan edits but keeps the day's categories
-        const keep = prev[d]?.cats;
-        const merged: Override = patch === null ? (keep && keep.length ? { cats: keep } : {}) : { ...(prev[d] || {}), ...patch };
-        if (isEmptyOv(merged)) { delete next[d]; pending.current.set(d, null); }
-        else { next[d] = merged; pending.current.set(d, merged); }
+  // write (or with row === null, clear) a set of person-days
+  const writeDays = useCallback((changes: { person_id: string; day: string; row: Omit<PDay, "person_id" | "day"> | null }[]) => {
+    if (!canWrite || !changes.length) return;
+    setPd((prev) => {
+      const next = new Map(prev);
+      for (const c of changes) {
+        const k = key(c.person_id, c.day);
+        if (c.row === null) { if (next.has(k) || pending.current.has(k)) { next.delete(k); pending.current.set(k, { del: true, person_id: c.person_id, day: c.day }); } }
+        else { const r: PDay = { person_id: c.person_id, day: c.day, ...c.row }; next.set(k, r); pending.current.set(k, r); }
       }
       return next;
     });
@@ -146,64 +124,151 @@ export default function PlanApp({ calendar, role, initialRows, initialCategories
 
   // ---- live updates from other editors ----
   useEffect(() => {
-    const ch = supabase.channel(`plan_days:${calendar.id}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "plan_days", filter: `calendar_id=eq.${calendar.id}` }, (payload: any) => {
-        const row = (payload.new?.day ? payload.new : payload.old) as PlanRow | undefined;
-        if (!row?.day || pending.current.has(row.day)) return;
-        setOverrides((prev) => {
-          const next = { ...prev };
-          if (payload.eventType === "DELETE") delete next[row.day];
-          else next[row.day] = rowsToOverrides([payload.new])[row.day];
+    const ch = supabase.channel(`plan_person_days:${calendar.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "plan_person_days", filter: `calendar_id=eq.${calendar.id}` }, (payload: any) => {
+        const row = (payload.eventType === "DELETE" ? payload.old : payload.new) as PDay | undefined;
+        if (!row?.day || !row.person_id) return;
+        const k = key(row.person_id, row.day);
+        if (pending.current.has(k)) return;
+        setPd((prev) => {
+          const next = new Map(prev);
+          if (payload.eventType === "DELETE") next.delete(k);
+          else next.set(k, { person_id: row.person_id, day: row.day, place: row.place, loc: row.loc, note: row.note });
           return next;
         });
       }).subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [supabase, calendar.id]);
-
-  useEffect(() => {
-    const ch = supabase.channel(`plan_categories:${calendar.id}`)
+    const ch2 = supabase.channel(`plan_events:${calendar.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "plan_events", filter: `calendar_id=eq.${calendar.id}` }, async () => {
+        const { data } = await supabase.from("plan_events").select(EV_SELECT).eq("calendar_id", calendar.id);
+        if (data) setEvents(data as PlanEvent[]);
+      }).subscribe();
+    const ch3 = supabase.channel(`plan_categories:${calendar.id}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "plan_categories", filter: `calendar_id=eq.${calendar.id}` }, async () => {
-        const { data } = await supabase.from("plan_categories").select("id,name,icon,color,sort").eq("calendar_id", calendar.id).order("sort").order("created_at");
+        const { data } = await supabase.from("plan_categories").select(CAT_SELECT).eq("calendar_id", calendar.id).order("sort").order("created_at");
         if (data) setCats(data as Category[]);
       }).subscribe();
-    return () => { supabase.removeChannel(ch); };
+    return () => { supabase.removeChannel(ch); supabase.removeChannel(ch2); supabase.removeChannel(ch3); };
   }, [supabase, calendar.id]);
 
   useEffect(() => {
     const h = () => { if (pending.current.size) flush(); };
-    window.addEventListener("beforeunload", h); return () => window.removeEventListener("beforeunload", h);
+    const up = () => { dragging.current = false; };
+    window.addEventListener("beforeunload", h); window.addEventListener("mouseup", up);
+    return () => { window.removeEventListener("beforeunload", h); window.removeEventListener("mouseup", up); };
   }, [flush]);
 
   // ---- derived ----
-  const C = useMemo(() => compute(overrides), [overrides]);
-  const t = useMemo(() => {
-    const t = { us: 0, es: 0, eu: 0, eur: 0, fam: 0, mi: 0, E: 0, W: 0 };
-    for (const x of C) { t.us += x.us; t.es += x.es; t.eu += x.eu; t.eur += x.eur; t.fam += x.fam; t.mi += x.mi; if (x.fl === "E") t.E++; if (x.fl === "W") t.W++; }
-    return t;
-  }, [C]);
-  const margin = t.us - t.es;
-  const aug = C.filter((x) => x.d.startsWith("2027-08")).every((x) => x.loc === "ES");
-  const nEdited = Object.values(overrides).filter(planEdited).length;
+  const S = useMemo(() => compute(self, pd), [self, pd]);
   const catMap = useMemo(() => Object.fromEntries(cats.map((c) => [c.id, c])) as Record<string, Category>, [cats]);
-  const catCount = useMemo(() => { const m: Record<string, number> = {}; for (const x of C) for (const id of x.cats) m[id] = (m[id] || 0) + 1; return m; }, [C]);
-  const dayCats = (x: Day) => x.cats.map((id) => catMap[id]).filter(Boolean) as Category[];
-  const setCatOn = (days: string[], id: string, on: boolean) => {
-    for (const d of days) {
-      const cur = overrides[d]?.cats || [];
-      if (on === cur.includes(id)) continue;
-      edit([d], { cats: on ? [...cur, id] : cur.filter((c) => c !== id) });
+  const tog = useMemo(() => Object.fromEntries(others.map((p) => [p.id, S.map((s) => together(p, s, pd))])) as Record<string, boolean[]>, [others, S, pd]);
+  const t = useMemo(() => {
+    const t = { us: 0, es: 0, eu: 0, eur: 0, E: 0, W: 0 };
+    for (const x of S) { t.us += x.us; t.es += x.es; t.eu += x.eu; t.eur += x.eur; if (x.fl === "E") t.E++; if (x.fl === "W") t.W++; }
+    return t;
+  }, [S]);
+  const margin = t.us - t.es;
+  const aug = S.filter((x) => x.d.startsWith("2027-08")).every((x) => x.loc === "ES");
+  const sortedEvents = useMemo(() => [...events].sort((a, b) => a.start_day.localeCompare(b.start_day) || a.title.localeCompare(b.title)), [events]);
+  const evByDay = useMemo(() => {
+    const m: Record<string, PlanEvent[]> = {};
+    for (const e of sortedEvents) for (let i = DAY_INDEX[e.start_day] ?? 0; i <= (DAY_INDEX[e.end_day] ?? -1); i++) (m[DAYS[i]] = m[DAYS[i]] || []).push(e);
+    return m;
+  }, [sortedEvents]);
+  const checks = useMemo(() => buildChecks(S, people, pd, events, catMap), [S, people, pd, events, catMap]);
+  const conflictDays = useMemo(() => {
+    const s = new Set<string>();
+    for (const c of checks) if (c.kind === "event") for (let i = DAY_INDEX[c.a]; i <= DAY_INDEX[c.b]; i++) s.add(DAYS[i]);
+    return s;
+  }, [checks]);
+  const places = useMemo(() => {
+    const m = new Map<string, { place: string; loc: Loc; n: number }>();
+    // fixed order so buttons don't move while editing: the usual four, then the 10 most-used others A-Z
+    BASE_PLACES.forEach((b) => m.set(norm(b.place), { ...b, n: 0 }));
+    pd.forEach((r) => { if (!r.loc) return; const k = norm(r.place); const cur = m.get(k); if (cur) cur.n++; else m.set(k, { place: r.place, loc: r.loc, n: 1 }); });
+    const all = Array.from(m.values());
+    const rest = all.slice(BASE_PLACES.length).sort((a, b) => b.n - a.n).slice(0, 10).sort((a, b) => a.place.localeCompare(b.place));
+    return [...all.slice(0, BASE_PLACES.length), ...rest];
+  }, [pd]);
+
+  // ---- selection ----
+  const range = useMemo(() => {
+    if (!selA) return null;
+    const b = selB || selA; const [a, z] = selA <= b ? [selA, b] : [b, selA];
+    return { a, b: z, days: DAYS.slice(DAY_INDEX[a], DAY_INDEX[z] + 1) };
+  }, [selA, selB]);
+  const inSel = (d: string) => !!range && d >= range.a && d <= range.b;
+  const select = (a: string | null, b: string | null = null) => { setSelA(a); setSelB(b); setOther(null); };
+  const pressDay = (d: string, shift = false) => {
+    if (selA && (shift || !selB)) { setSelB(d); } else { select(d); }
+    dragging.current = true;
+  };
+  const enterDay = (d: string) => { if (dragging.current && selA && d !== (selB || selA)) setSelB(d); };
+  const dayHandlers = (d: string) => ({
+    onMouseDown: (e: React.MouseEvent) => { e.preventDefault(); pressDay(d, e.shiftKey); },
+    onMouseEnter: () => enterDay(d),
+    onKeyDown: (e: React.KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pressDay(d, e.shiftKey); dragging.current = false; } },
+  });
+  useEffect(() => {
+    // prefill the note box when every selected day (first selected person) shares one note
+    if (!range) { setNoteDraft(""); return; }
+    const pid = Array.from(selPeople)[0]; if (!pid) return;
+    const notes = new Set(range.days.map((d) => pd.get(key(pid, d))?.note || ""));
+    setNoteDraft(notes.size === 1 ? Array.from(notes)[0] : "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selA, selB, selPeople]);
+
+  const applyPlace = (place: string, loc: Loc) => {
+    if (!range || !place.trim()) return;
+    const note = noteDraft.trim() || null;
+    const changes: Parameters<typeof writeDays>[0] = [];
+    for (const p of people.filter((x) => selPeople.has(x.id))) {
+      const isDefault = !!p.default_place && norm(p.default_place) === norm(place) && !note;
+      for (const d of range.days) changes.push({ person_id: p.id, day: d, row: isDefault ? null : { place: place.trim(), loc, note } });
     }
+    writeDays(changes); setOther(null);
   };
-  const togglePick = (d: string) => setPicked((p) => { const n = new Set(p); if (n.has(d)) n.delete(d); else n.add(d); return n; });
-  const fillRange = () => {
-    const ds = Array.from(picked).sort(); if (ds.length < 2) return;
-    const a = ds[0], b = ds[ds.length - 1];
-    setPicked(new Set(BASE.map((x) => x.d).filter((d) => d >= a && d <= b)));
+  const applyNote = (v: string) => {
+    if (!range) return;
+    const changes: Parameters<typeof writeDays>[0] = [];
+    for (const pid of Array.from(selPeople)) for (const d of range.days) {
+      const r = pd.get(key(pid, d)); if (r && (r.note || "") !== v.trim()) changes.push({ person_id: pid, day: d, row: { place: r.place, loc: r.loc, note: v.trim() || null } });
+    }
+    writeDays(changes);
   };
-  const selDay = sel ? C.find((x) => x.d === sel) : null;
-  const selBase = sel ? BASE.find((x) => x.d === sel) : null;
+  const clearSel = () => {
+    if (!range) return;
+    const changes: Parameters<typeof writeDays>[0] = [];
+    for (const p of others.filter((x) => selPeople.has(x.id))) for (const d of range.days) changes.push({ person_id: p.id, day: d, row: null });
+    writeDays(changes);
+  };
+
+  // ---- events ----
+  const newEvent = (a: string, b: string): PlanEvent => ({ id: "", title: "", start_day: a, end_day: b, place: null, category_id: null, must: true, note: null });
+  async function saveEvent(e: PlanEvent) {
+    const row = { calendar_id: calendar.id, title: e.title.trim(), start_day: e.start_day, end_day: e.end_day < e.start_day ? e.start_day : e.end_day, place: e.place?.trim() || null, category_id: e.category_id || null, must: e.must, note: e.note?.trim() || null, updated_by: userId };
+    const q = e.id ? supabase.from("plan_events").update(row).eq("id", e.id) : supabase.from("plan_events").insert(row);
+    const { data, error } = await q.select(EV_SELECT).single();
+    if (error || !data) { alert(error?.message || "Could not save the event"); return; }
+    setEvents((p) => [...p.filter((x) => x.id !== data.id), data as PlanEvent]); setEvEdit(null);
+  }
+  async function deleteEvent(e: PlanEvent) {
+    setEvents((p) => p.filter((x) => x.id !== e.id)); setEvEdit(null);
+    const { error } = await supabase.from("plan_events").delete().eq("id", e.id);
+    if (error) alert(error.message);
+  }
 
   async function signOut() { await supabase.auth.signOut(); window.location.href = "/login"; }
+
+  const evIcon = (e: PlanEvent) => (e.category_id && catMap[e.category_id]?.icon) || "◆";
+  const evColor = (e: PlanEvent) => (e.category_id && catMap[e.category_id]?.color) || "#5f6b73";
+  const dayTip = (s: SDay, i: number) => {
+    const who = others.map((p) => { const w = whereIs(p, s.d, pd); return w ? `${p.name}: ${w.place}` : ""; }).filter(Boolean).join(", ");
+    const fl = s.fl === "E" ? " · fly Miami → Europe (overnight)" : s.fl === "W" ? " · fly Europe → Miami" : "";
+    const ev = (evByDay[s.d] || []).map((e) => evIcon(e) + " " + e.title).join(", ");
+    return `${fmt(s.d)} · ${s.place} (${LOC[s.loc].name})${fl}${s.off ? " · ★ " + s.off : ""}${s.note ? " · " + s.note : ""}${who ? " · " + who : ""}${ev ? " · " + ev : ""}`;
+  };
+
+  const selInfo = range && range.a === range.b ? S[DAY_INDEX[range.a]] : null;
 
   return (
     <div className="app plan">
@@ -228,15 +293,9 @@ export default function PlanApp({ calendar, role, initialRows, initialCategories
           )}
         </div>
         <div className="topbar__actions">
+          <span className={"plan__status plan__status--" + status.kind}>{!canWrite ? "View only" : status.text}</span>
+          {canWrite && <button className="btn" onClick={() => setEvEdit(newEvent(range?.a || DAYS[0], range?.b || range?.a || DAYS[0]))}>＋ Event</button>}
           {canWrite && <button className="btn" onClick={() => setCatsOpen(true)}>🏷️ Categories</button>}
-          <span className={"plan__status plan__status--" + status.kind}>
-            {!canWrite ? "View only" : status.text || (nEdited ? `${nEdited} day${nEdited > 1 ? "s" : ""} edited` : "Claude's plan, no edits")}
-          </span>
-          {canWrite && nEdited > 0 && (
-            <button className="btn" onClick={() => { if (!armReset) { setArmReset(true); setTimeout(() => setArmReset(false), 4000); return; } edit(Object.keys(overrides).filter((d) => planEdited(overrides[d])), null); setArmReset(false); }}>
-              {armReset ? "Click again to reset all" : "Reset all edits"}
-            </button>
-          )}
         </div>
       </header>
 
@@ -244,58 +303,70 @@ export default function PlanApp({ calendar, role, initialRows, initialCategories
         <div className="plan__totals">
           <span><b>{t.us}</b>USA</span><span><b>{t.es}</b>Spain</span>
           <span className={"plan__chk plan__chk--" + (margin >= 37 ? "ok" : margin > 0 ? "warn" : "bad")}>USA − Spain = {margin}{margin < 37 ? " (target ≥40)" : ""}</span>
-          <span><b>{t.eu}</b>Europe (not Spain)</span><span><b>{t.eur}</b>any Europe</span>
-          <span><b>{t.fam}</b>with Milsy &amp; Mason</span><span><b>{t.mi}</b>with Milsy</span><span><b>{t.E + t.W}</b>flights</span>
+          <span><b>{t.eu}</b>Rest of world</span>
+          {others.filter((p) => p.default_place || tog[p.id]?.some(Boolean)).map((p) => <span key={p.id}><b>{tog[p.id].filter(Boolean).length}</b>with {p.name}</span>)}
+          <span><b>{t.E + t.W}</b>flights</span>
           <span className={"plan__chk plan__chk--" + (t.es < 183 ? "ok" : "bad")}>Spain &lt; 183</span>
           <span className={"plan__chk plan__chk--" + (aug ? "ok" : "bad")}>August in Spain</span>
         </div>
 
+        <details className={"plan__checks" + (checks.length ? " has" : "")} open={checks.length > 0 && checks.length <= 8}>
+          <summary>{checks.length ? `⚠ ${checks.length} thing${checks.length > 1 ? "s" : ""} to look at` : "✓ No conflicts: every must-attend event and school holiday is covered"}</summary>
+          {checks.map((c, i) => (
+            <button key={i} className={"plan__check plan__check--" + c.kind} onClick={() => { select(c.a, c.b); if (view === "stays" || view === "events") setView("time"); }}>{c.text}</button>
+          ))}
+        </details>
+
         <div className="plan__tabs" role="tablist">
-          {VIEWS.map((v) => <button key={v.id} role="tab" aria-selected={view === v.id} className={"preset" + (view === v.id ? " is-on" : "")} onClick={() => setView(v.id)}>{v.name}</button>)}
-          {canWrite && <button className={"preset" + (multi ? " is-on" : "")} style={{ marginLeft: "auto" }} onClick={() => { setMulti((v) => !v); setPicked(new Set()); setSel(null); }}>{multi ? "✓ Done selecting" : "☐ Select days"}</button>}
+          {VIEWS.map((v) => <button key={v.id} role="tab" aria-selected={view === v.id} className={"preset" + (view === v.id ? " is-on" : "")} onClick={() => setView(v.id)}>{v.name}{v.id === "events" && events.length ? ` (${events.length})` : ""}</button>)}
         </div>
 
-        <div className="plan__legend">
-          {view === "loc" && <>
-            <span><i className="sw" style={{ background: "var(--p-us)" }} />USA ({t.us})</span>
-            <span><i className="sw" style={{ background: "var(--p-es)" }} />Spain ({t.es})</span>
-            <span><i className="sw" style={{ background: "var(--p-eu)" }} />Europe outside Spain ({t.eu})</span>
+        {(view === "year" || view === "time") && (
+          <div className="plan__layers">
+            <span className="lbl">Show:</span>
+            {others.map((p) => <button key={p.id} className={"layer" + (layers.has(p.id) ? " is-on" : "")} aria-pressed={layers.has(p.id)} onClick={() => toggleLayer(p.id)}><i className="pdot" style={{ background: p.color }} />{p.name}</button>)}
+            <button className={"layer" + (layers.has("hol") ? " is-on" : "")} aria-pressed={layers.has("hol")} onClick={() => toggleLayer("hol")}>★ School holidays</button>
+            <button className={"layer" + (layers.has("ev") ? " is-on" : "")} aria-pressed={layers.has("ev")} onClick={() => toggleLayer("ev")}>◆ Events</button>
+            <button className={"layer" + (layers.has("fl") ? " is-on" : "")} aria-pressed={layers.has("fl")} onClick={() => toggleLayer("fl")}>✈ Flights</button>
+          </div>
+        )}
+
+        {view === "year" && <>
+          <div className="plan__legend">
+            {(Object.keys(LOC) as Loc[]).map((k) => <span key={k}><i className="sw" style={{ background: LOC[k].c }} />{LOC[k].name}</span>)}
             <span><i className="sw" style={{ background: "linear-gradient(135deg,var(--p-es) 50%,var(--p-us) 50%)" }} />Travel day, counts in both</span>
-            <span>★ school holiday (ASB)</span></>}
-          {view === "mi" && <><span><i className="sw" style={{ background: "var(--p-mi)" }} />Together</span><span><i className="sw" />Apart</span></>}
-          {view === "ma" && <><span><i className="sw" style={{ background: "var(--p-ma)" }} />Together</span><span><i className="sw" />Apart</span></>}
-          {view === "fl" && <><span><i className="sw" style={{ background: "var(--p-fe)" }} />Depart Miami ({t.E}, overnight)</span><span><i className="sw" style={{ background: "var(--p-fw)" }} />Depart Europe ({t.W}, land same day)</span></>}
-          {view === "act" && (cats.length
-            ? cats.map((c) => <span key={c.id}><i className="sw" style={{ background: c.color }} />{c.icon} {c.name} ({catCount[c.id] || 0})</span>)
-            : <span>No categories yet{canWrite ? ". Add one with 🏷️ Categories, then tap a day (or use Select days) to mark it." : "."}</span>)}
-          {view === "rng" && <span>One row per stretch of consecutive days with the same location, note and family flags. Edit a note and press Enter (or click away) to apply it to every day in that row. “Merge up” makes a row identical to the one above it.</span>}
-        </div>
-
-        {view === "rng" ? <Ranges C={C} canWrite={canWrite} edit={edit} catMap={catMap} /> : (
+            <span><i className="pdot" style={{ background: "var(--ink)" }} /> in the same place as you</span>
+            <span><i className="pdot ring" style={{ borderColor: "var(--ink)" }} /> in Spain without you (Sierra, Zoe)</span>
+            <span>{canWrite ? "Click a day, then a second day (or drag) to pick a range." : ""}</span>
+          </div>
           <div className="plan__months">
             {MN.map((name, mo) => {
-              const md = C.filter((x) => +x.d.slice(5, 7) === mo + 1);
+              const md = S.filter((x) => +x.d.slice(5, 7) === mo + 1);
               const lead = (new Date(2027, mo, 1).getDay() + 6) % 7;
-              const cnt = view === "act" ? md.filter((x) => x.cats.length).length : view === "fl" ? md.filter((x) => x.fl).length : view === "loc" ? md.filter((x) => x.off).length : md.reduce((a, x) => a + (view === "mi" ? x.mi : x.fam), 0);
               return (
                 <div className="plan__month" key={name}>
-                  <h3>{name}<span>{view === "loc" ? `${cnt} holiday` : `${cnt} / ${md.length}`}</span></h3>
+                  <h3>{name}<span>{md.reduce((a, x) => a + x.us, 0)} US · {md.reduce((a, x) => a + x.es, 0)} ES</span></h3>
                   <div className="plan__grid">
                     {["M","T","W","T","F","S","S"].map((x, i) => <div className="plan__dow" key={i}>{x}</div>)}
                     {Array.from({ length: lead }).map((_, i) => <div key={"e" + i} />)}
                     {md.map((x) => {
-                      const dc = dayCats(x);
-                      let on = false, col = "", two = "", split = false, star = false;
-                      if (view === "fl") { on = !!x.fl; col = x.fl === "E" ? "var(--p-fe)" : "var(--p-fw)"; }
-                      else if (view === "act") { on = dc.length > 0; col = dc[0]?.color || ""; }
-                      else if (view === "loc") { on = true; col = LOC[x.loc].c; if (x.prev && x.prev !== x.loc && x.prev !== "US") two = LOC[x.prev].c; star = !!x.off; }
-                      else { on = (view === "mi" ? x.mi : x.fam) === 1; col = view === "mi" ? "var(--p-mi)" : "var(--p-ma)"; }
-                      const cls = "plan__day" + (on ? (two ? " two" : split ? " split" : " on") : "") + (x.edited ? " edited" : "") + (sel === x.d || picked.has(x.d) ? " sel" : "");
-                      const flTxt = x.fl === "E" ? " · Fly Miami → Europe (overnight)" : x.fl === "W" ? " · Fly Europe → Miami" : "";
-                      const tip = `${x.d} · ${LOC[x.loc].name}${flTxt}${x.off ? " · " + x.off : ""}${x.n ? " · " + x.n : ""}${dc.length ? " · " + dc.map((c) => c.icon + " " + c.name).join(", ") : ""}`;
+                      const i = DAY_INDEX[x.d];
+                      const two = x.prevLoc && x.prevLoc !== x.loc && x.prevLoc !== "US" ? LOC[x.prevLoc].c : "";
+                      const evs = layers.has("ev") ? evByDay[x.d] || [] : [];
+                      const cls = "plan__day " + (two ? "two" : "on") + (inSel(x.d) ? " sel" : "") + (evs.length && conflictDays.has(x.d) ? " clash" : "");
                       return (
-                        <button key={x.d} className={cls} style={{ ["--c" as any]: two || col, ["--c2" as any]: col }} title={tip} onClick={() => (multi ? togglePick(x.d) : setSel(sel === x.d ? null : x.d))}>
-                          {star && <span className="star">★</span>}{+x.d.slice(8)}{dc.length > 0 && <span className="cats">{dc.slice(0, 2).map((c) => c.icon).join("")}</span>}
+                        <button key={x.d} className={cls} style={{ ["--c" as any]: two || LOC[x.loc].c, ["--c2" as any]: LOC[x.loc].c }} title={dayTip(x, i)} {...dayHandlers(x.d)}>
+                          {layers.has("hol") && x.off && <span className="star">★</span>}
+                          {evs.length > 0 && <span className="evi">{evIcon(evs[0])}</span>}
+                          {layers.has("fl") && x.fl && <span className="fli">✈</span>}
+                          {+x.d.slice(8)}
+                          <span className="dots">
+                            {others.filter((p) => layers.has(p.id)).map((p) => {
+                              if (tog[p.id][i]) return <i key={p.id} className="pdot" style={{ background: p.color }} />;
+                              const w = !p.default_place ? whereIs(p, x.d, pd) : null;
+                              return w && w.loc === "ES" ? <i key={p.id} className="pdot ring" style={{ borderColor: p.color }} /> : null;
+                            })}
+                          </span>
                         </button>
                       );
                     })}
@@ -304,54 +375,87 @@ export default function PlanApp({ calendar, role, initialRows, initialCategories
               );
             })}
           </div>
+        </>}
+
+        {view === "time" && <Timeline S={S} people={people} pd={pd} tog={tog} layers={layers} sortedEvents={sortedEvents} catMap={catMap} conflictDays={conflictDays}
+          range={range} dayHandlers={dayHandlers} evIcon={evIcon} evColor={evColor}
+          onSeg={(pid, a, b) => { select(a, b); setSelPeople(new Set([pid])); }} onEvent={(e) => setEvEdit(e)} />}
+
+        {view === "stays" && <Stays S={S} people={people} pd={pd} tog={tog} person={staysPerson} setPerson={setStaysPerson} canWrite={canWrite}
+          onNote={(pid, days, v) => writeDays(days.map((d) => { const r = pd.get(key(pid, d))!; return { person_id: pid, day: d, row: { place: r.place, loc: r.loc, note: v.trim() || null } }; }))}
+          onPick={(pid, a, b) => { select(a, b); setSelPeople(new Set([pid])); }} />}
+
+        {view === "events" && (
+          <div className="plan__tablewrap">
+            <table className="plan__ranges">
+              <thead><tr><th>When</th><th>Event</th><th>Where</th><th>Type</th><th>Must be there</th><th>Status</th></tr></thead>
+              <tbody>
+                {sortedEvents.length === 0 && <tr><td colSpan={6} className="no">No events yet.{canWrite ? " Use ＋ Event to add a match, forum day or anything you want to be in town for." : ""}</td></tr>}
+                {sortedEvents.map((e) => {
+                  const place = eventPlace(e, catMap);
+                  const bad = DAYS.slice(DAY_INDEX[e.start_day], DAY_INDEX[e.end_day] + 1).filter((d) => conflictDays.has(d));
+                  const c = e.category_id ? catMap[e.category_id] : null;
+                  return (
+                    <tr key={e.id} className="clk" onClick={() => setEvEdit(e)}>
+                      <td className="n">{fmtRange(e.start_day, e.end_day)}</td>
+                      <td><b>{evIcon(e)} {e.title}</b>{e.note ? <span className="meta"> · {e.note}</span> : null}</td>
+                      <td>{place || <span className="no">—</span>}</td>
+                      <td>{c ? <span className="pill" style={{ background: c.color }}>{c.icon} {c.name}</span> : <span className="no">—</span>}</td>
+                      <td>{e.must ? "Yes" : <span className="no">Optional</span>}</td>
+                      <td>{!place ? <span className="no">No place set</span> : !e.must ? <span className="no">—</span> : bad.length ? <span className="bad">✗ You&apos;re in {S[DAY_INDEX[bad[0]]].place}</span> : <span className="yes">✓ You&apos;re there</span>}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
 
-        <p className="plan__note">A day counts in a country if you are physically there at any point, so a daytime Europe to Miami flight day counts on both sides (half-filled). An overnight Miami to Europe flight counts the departure day in the USA and the arrival day in Europe only. With Milsy &amp; Mason = Spain days, school-holiday days in Europe, and the Philadelphia Thanksgiving days; With Milsy defaults to the same days — tick “Milsy with me” on a day to add her. Fall 2027 school holidays are assumed from the 2026-27 ASB pattern. Dots mark edited days.</p>
+        <p className="plan__note">A day counts in a country if you are physically there at any point, so a daytime Europe to Miami flight day counts on both sides (half-filled). An overnight Miami to Europe flight counts the departure day in the USA and the arrival day in Europe only. “With” someone means being in the same place that day: Barcelona and Calella de Palafrugell are different places. Milsy and Mason are in Barcelona unless a stay says otherwise. Fall 2027 school holidays are assumed from the 2026-27 ASB pattern.</p>
       </main>
 
-      {!multi && selDay && selBase && (
+      {range && (
         <div className="plan__sheet">
-          <div className="row"><span className="title">{fmt(selDay.d, true)}</span><span className="meta">{selDay.off || "School day"}{selDay.fl ? (selDay.fl === "E" ? " · fly Miami → Europe tonight" : " · fly Europe → Miami") : ""}</span><button className="btn x" onClick={() => setSel(null)}>Close</button></div>
-          <div className="row">{(Object.keys(LOC) as Loc[]).map((k) => <button key={k} className="locbtn" style={{ ["--c" as any]: LOC[k].c }} aria-pressed={selDay.loc === k} disabled={!canWrite} onClick={() => edit([selDay.d], { loc: k })}>{LOC[k].name}</button>)}</div>
           <div className="row">
-            <label><input type="checkbox" checked={!!selDay.fam} disabled={!canWrite} onChange={(e) => edit([selDay.d], { fam: e.target.checked })} /> Milsy &amp; Mason with me</label>
-            <label><input type="checkbox" checked={!!selDay.mi} disabled={!canWrite} onChange={(e) => edit([selDay.d], { mi: e.target.checked })} /> Milsy with me</label>
+            <span className="title">{range.a === range.b ? fmt(range.a, true) : `${fmtRange(range.a, range.b)} · ${range.days.length} days`}</span>
+            {selInfo && <span className="meta">
+              {selInfo.place} ({LOC[selInfo.loc].name}){selInfo.fl ? (selInfo.fl === "E" ? " · fly Miami → Europe tonight" : " · fly Europe → Miami") : ""}{selInfo.off ? " · ★ " + selInfo.off : ""}
+              {others.map((p) => { const w = whereIs(p, selInfo.d, pd); return w ? ` · ${p.name}: ${w.place}` : ""; }).join("")}
+              {(evByDay[selInfo.d] || []).map((e) => ` · ${evIcon(e)} ${e.title}`).join("")}
+            </span>}
+            {!selInfo && !selB && <span className="meta">Click another day to finish the range</span>}
+            <button className="btn x" onClick={() => select(null)}>Close</button>
           </div>
-          {(cats.length > 0 || canWrite) && (
+          {canWrite && <>
             <div className="row">
-              {cats.map((c) => { const on = selDay.cats.includes(c.id); return <button key={c.id} className="locbtn" style={{ ["--c" as any]: c.color }} aria-pressed={on} disabled={!canWrite} onClick={() => setCatOn([selDay.d], c.id, !on)}>{c.icon} {c.name}</button>; })}
-              {canWrite && <button className="btn" onClick={() => setCatsOpen(true)}>{cats.length ? "Edit categories" : "＋ Add a category (e.g. Forum)"}</button>}
+              <span className="lbl">Who</span>
+              {people.map((p) => <button key={p.id} className="locbtn who" style={{ ["--c" as any]: "var(--ink)" }} aria-pressed={selPeople.has(p.id)} onClick={() => setSelPeople((s) => { const n = new Set(s); if (n.has(p.id)) n.delete(p.id); else n.add(p.id); return n; })}><i className="pdot" style={{ background: p.color }} />{p.name}</button>)}
             </div>
-          )}
-          <div className="row">
-            <NoteInput key={selDay.d} value={selDay.n} disabled={!canWrite} onCommit={(v) => edit([selDay.d], { n: v })} />
-            {selDay.edited && canWrite && <button className="btn" onClick={() => edit([selDay.d], null)}>Reset day</button>}
-            <span className="meta">Claude&apos;s plan: {LOC[selBase.loc].name}{selBase.n ? " · " + selBase.n : ""}</span>
-          </div>
+            <div className="row">
+              <span className="lbl">Where</span>
+              {places.map((pl) => {
+                const on = selPeople.size > 0 && people.filter((p) => selPeople.has(p.id)).every((p) => range.days.every((d) => norm(whereIs(p, d, pd)?.place) === norm(pl.place)));
+                return <button key={pl.place} className="locbtn" style={{ ["--c" as any]: LOC[pl.loc].c }} aria-pressed={on} disabled={!selPeople.size} onClick={() => applyPlace(pl.place, pl.loc)}><i className="sw" style={{ background: LOC[pl.loc].c }} />{pl.place}</button>;
+              })}
+              {other === null
+                ? <button className="btn" disabled={!selPeople.size} onClick={() => setOther("")}>Somewhere else…</button>
+                : <>
+                    <input type="text" className="short" autoFocus value={other} placeholder="Place, e.g. Lisbon" onChange={(e) => setOther(e.target.value)} />
+                    {(Object.keys(LOC) as Loc[]).map((k) => <button key={k} className="locbtn" style={{ ["--c" as any]: LOC[k].c }} disabled={!other.trim()} onClick={() => applyPlace(other, k)}>in {LOC[k].name}</button>)}
+                  </>}
+            </div>
+            <div className="row">
+              <span className="lbl">Note</span>
+              <input type="text" value={noteDraft} placeholder="Optional note for these days (Enter to save)" onChange={(e) => setNoteDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); applyNote(noteDraft); } }} />
+              {others.some((p) => selPeople.has(p.id) && range.days.some((d) => pd.has(key(p.id, d)))) && <button className="btn" onClick={clearSel}>Clear (back to home / unknown)</button>}
+              <button className="btn" onClick={() => setEvEdit(newEvent(range.a, range.b))}>＋ Event on {range.a === range.b ? "this day" : "these days"}</button>
+            </div>
+          </>}
         </div>
       )}
 
-      {multi && (
-        <div className="plan__sheet">
-          <div className="row">
-            <span className="title">{picked.size} day{picked.size === 1 ? "" : "s"} selected</span>
-            <span className="meta">Tap days to select{picked.size > 1 ? "; Fill range selects every day between the first and last" : ""}</span>
-            {picked.size > 1 && <button className="btn" onClick={fillRange}>Fill range</button>}
-            {picked.size > 0 && <button className="btn" onClick={() => setPicked(new Set())}>Clear</button>}
-            <button className="btn x" onClick={() => { setMulti(false); setPicked(new Set()); }}>Done</button>
-          </div>
-          <div className="row">
-            {cats.map((c) => {
-              const days = Array.from(picked);
-              const all = days.length > 0 && days.every((d) => (overrides[d]?.cats || []).includes(c.id));
-              return <button key={c.id} className="locbtn" style={{ ["--c" as any]: c.color }} aria-pressed={all} disabled={!days.length} title={all ? "Remove from selected days" : "Add to selected days"} onClick={() => setCatOn(days, c.id, !all)}>{all ? "✓ " : "+ "}{c.icon} {c.name}</button>;
-            })}
-            <button className="btn" onClick={() => setCatsOpen(true)}>{cats.length ? "Edit categories" : "＋ Add a category (e.g. Forum)"}</button>
-          </div>
-        </div>
-      )}
-
-      {catsOpen && <CategoriesModal calendarId={calendar.id} supabase={supabase} cats={cats} setCats={setCats} onDelete={(id) => setCatOn(Object.keys(overrides), id, false)} onClose={() => setCatsOpen(false)} />}
+      {evEdit && <EventModal ev={evEdit} cats={cats} places={places.map((p) => p.place)} canWrite={canWrite} onSave={saveEvent} onDelete={deleteEvent} onClose={() => setEvEdit(null)} />}
+      {catsOpen && <CategoriesModal calendarId={calendar.id} supabase={supabase} cats={cats} setCats={setCats} onClose={() => setCatsOpen(false)} />}
       {members && <MembersModal calendarId={calendar.id} supabase={supabase} onClose={() => setMembers(false)} />}
     </div>
   );
@@ -364,39 +468,162 @@ function NoteInput({ value, disabled, onCommit, placeholder }: { value: string; 
   return <input type="text" value={v} disabled={disabled} placeholder={placeholder || "Note (optional)"} onChange={(e) => setV(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); (e.target as HTMLInputElement).blur(); } }} />;
 }
 
-function Ranges({ C, canWrite, edit, catMap }: { C: Day[]; canWrite: boolean; edit: (days: string[], patch: Override | null) => void; catMap: Record<string, Category> }) {
-  const rows = useMemo(() => {
-    const rows: { start: string; end: string; loc: Loc; n: string; fam: number; mi: number; ck: string; days: Day[] }[] = [];
-    for (const x of C) {
-      const last = rows[rows.length - 1];
-      if (last && last.loc === x.loc && last.n === x.n && last.fam === x.fam && last.mi === x.mi && last.ck === x.cats.join(",")) { last.end = x.d; last.days.push(x); }
-      else rows.push({ start: x.d, end: x.d, loc: x.loc, n: x.n, fam: x.fam, mi: x.mi, ck: x.cats.join(","), days: [x] });
-    }
-    return rows;
-  }, [C]);
-  const yn = (b: number) => (b ? <span className="yes">Yes</span> : <span className="no">—</span>);
+// ---- Timeline: one row per person, plus school holidays and events, month by month ----
+function Timeline({ S, people, pd, tog, layers, sortedEvents, catMap, conflictDays, range, dayHandlers, evIcon, evColor, onSeg, onEvent }: {
+  S: SDay[]; people: Person[]; pd: Map<string, PDay>; tog: Record<string, boolean[]>; layers: Set<string>; sortedEvents: PlanEvent[]; catMap: Record<string, Category>; conflictDays: Set<string>;
+  range: { a: string; b: string; days: string[] } | null; dayHandlers: (d: string) => any; evIcon: (e: PlanEvent) => string; evColor: (e: PlanEvent) => string;
+  onSeg: (personId: string, a: string, b: string) => void; onEvent: (e: PlanEvent) => void;
+}) {
+  const rows = people.filter((p) => p.is_self || layers.has(p.id));
   return (
-    <div className="plan__tablewrap">
-      <table className="plan__ranges">
-        <thead><tr><th>From</th><th>To</th><th>Days</th><th>Location</th><th>Milsy &amp; Mason</th><th>Milsy</th><th>School holiday</th><th>Flights</th><th>Activities</th><th>Note</th><th></th></tr></thead>
-        <tbody>
-          {rows.map((r, i) => {
-            const hol = r.days.filter((x) => x.off).length;
-            const fl = r.days.filter((x) => x.fl).map((x) => (x.fl === "E" ? "→EU" : "→MIA")).join(" ");
-            const edited = r.days.some((x) => x.edited);
-            return (
-              <tr key={r.start}>
-                <td className="n">{fmt(r.start)}</td><td className="n">{r.start === r.end ? "" : fmt(r.end)}</td><td className="n">{r.days.length}</td>
-                <td><span className="pill" style={{ background: LOC[r.loc].c }}>{LOC[r.loc].name}</span>{edited ? " •" : ""}</td>
-                <td>{yn(r.fam)}</td><td>{yn(r.mi)}</td><td>{hol ? `★ ${hol === r.days.length ? "all" : hol}` : "—"}</td><td className="n">{fl}</td>
-                <td>{r.days[0].cats.map((id) => catMap[id]).filter(Boolean).map((c) => <span key={c.id} className="pill" style={{ background: c.color, marginRight: 4 }}>{c.icon} {c.name}</span>)}</td>
-                <td><NoteInput key={r.start + r.n} value={r.n} disabled={!canWrite} placeholder="Add a note for these days" onCommit={(v) => edit(r.days.map((x) => x.d), { n: v })} /></td>
-                <td>{i > 0 && canWrite && <button className="btn mrg" title="Give these days the same location, flags and note as the row above" onClick={() => { const a = rows[i - 1]; edit(r.days.map((x) => x.d), { loc: a.loc, n: a.n, fam: !!a.fam, mi: !!a.mi, cats: a.days[0].cats }); }}>Merge up</button>}</td>
+    <div className="tl">
+      {MN.map((name, mo) => {
+        const md = S.filter((x) => +x.d.slice(5, 7) === mo + 1);
+        const n = md.length, first = md[0].d, last = md[n - 1].d;
+        const col = (d: string) => DAY_INDEX[d] - DAY_INDEX[first] + 2;
+        // person segments: runs of the same place (and same with-you status)
+        const segs = rows.map((p) => {
+          const out: { a: string; b: string; place: string; loc: Loc | null; tg: boolean; home: boolean }[] = [];
+          for (const x of md) {
+            const w = whereIs(p, x.d, pd); if (!w) continue;
+            const tg = p.is_self || tog[p.id][DAY_INDEX[x.d]];
+            const l = out[out.length - 1];
+            if (l && DAY_INDEX[l.b] + 1 === DAY_INDEX[x.d] && norm(l.place) === norm(w.place) && l.tg === tg) l.b = x.d;
+            else out.push({ a: x.d, b: x.d, place: w.place, loc: w.loc, tg, home: !w.explicit });
+          }
+          return out;
+        });
+        const hol: { a: string; b: string; name: string }[] = [];
+        if (layers.has("hol")) for (const x of md) { if (!x.off) continue; const l = hol[hol.length - 1]; if (l && DAY_INDEX[l.b] + 1 === DAY_INDEX[x.d] && l.name === x.off) l.b = x.d; else hol.push({ a: x.d, b: x.d, name: x.off }); }
+        // events: greedy lanes
+        const lanes: PlanEvent[][] = [];
+        if (layers.has("ev")) for (const e of sortedEvents) {
+          if (e.end_day < first || e.start_day > last) continue;
+          let lane = lanes.find((l) => l[l.length - 1].end_day < e.start_day);
+          if (!lane) { lane = []; lanes.push(lane); }
+          lane.push(e);
+        }
+        let r = 1;
+        const selCols = range && range.b >= first && range.a <= last ? [col(range.a < first ? first : range.a), col(range.b > last ? last : range.b)] : null;
+        const totalRows = 1 + rows.length + (layers.has("hol") ? 1 : 0) + Math.max(lanes.length, layers.has("ev") ? 1 : 0);
+        return (
+          <div className="tl__month" key={name}>
+            <h3>{name}</h3>
+            <div className="tl__scroll">
+              <div className="tl__grid" style={{ gridTemplateColumns: `74px repeat(${n}, minmax(22px, 1fr))` }}>
+                {selCols && <div className="tl__sel" style={{ gridColumn: `${selCols[0]} / ${selCols[1] + 1}`, gridRow: `1 / span ${totalRows}` }} />}
+                <div className="tl__lbl" style={{ gridRow: 1, gridColumn: 1 }} />
+                {md.map((x) => {
+                  const dow = new Date(x.d + "T12:00:00").getDay();
+                  return <button key={x.d} className={"tl__day" + (dow === 0 || dow === 6 ? " we" : "")} style={{ gridRow: 1, gridColumn: col(x.d) }} title={fmt(x.d)} {...dayHandlers(x.d)}><span>{DOW[dow]}</span>{+x.d.slice(8)}</button>;
+                })}
+                {rows.map((p, pi) => {
+                  r++;
+                  return <React.Fragment key={p.id}>
+                    <div className="tl__lbl" style={{ gridRow: r, gridColumn: 1 }}><i className="pdot" style={{ background: p.color }} />{p.is_self ? "You" : p.name}</div>
+                    {segs[pi].map((s) => (
+                      <button key={s.a} className={"tl__seg" + (s.tg ? "" : " apart") + (s.home ? " home" : "")} style={{ gridRow: r, gridColumn: `${col(s.a)} / ${col(s.b) + 1}`, ["--c" as any]: s.loc ? LOC[s.loc].c : "#8a979e" }}
+                        title={`${p.name}: ${s.place}, ${fmtRange(s.a, s.b)}${p.is_self ? "" : s.tg ? " (with you)" : " (apart)"}`} onClick={() => onSeg(p.id, s.a, s.b)}>{s.place}</button>
+                    ))}
+                  </React.Fragment>;
+                })}
+                {layers.has("hol") && (() => { r++; return <>
+                  <div className="tl__lbl" style={{ gridRow: r, gridColumn: 1 }}>★ School off</div>
+                  {hol.map((h) => <div key={h.a} className="tl__seg hol" style={{ gridRow: r, gridColumn: `${col(h.a)} / ${col(h.b) + 1}` }} title={`${h.name}, ${fmtRange(h.a, h.b)}`}>{h.name.replace(" (ASB)", "")}</div>)}
+                </>; })()}
+                {layers.has("ev") && (lanes.length ? lanes : [[]]).map((lane, li) => { r++; return <React.Fragment key={li}>
+                  <div className="tl__lbl" style={{ gridRow: r, gridColumn: 1 }}>{li === 0 ? "◆ Events" : ""}</div>
+                  {lane.map((e) => {
+                    const a = e.start_day < first ? first : e.start_day, b = e.end_day > last ? last : e.end_day;
+                    const clash = DAYS.slice(DAY_INDEX[a], DAY_INDEX[b] + 1).some((d) => conflictDays.has(d)) && e.must && !!eventPlace(e, catMap);
+                    return <button key={e.id} className={"tl__seg ev" + (clash ? " clash" : "")} style={{ gridRow: r, gridColumn: `${col(a)} / ${col(b) + 1}`, ["--c" as any]: evColor(e) }} title={`${e.title}${eventPlace(e, catMap) ? " · " + eventPlace(e, catMap) : ""} · ${fmtRange(e.start_day, e.end_day)}${clash ? " · you're not there" : ""}`} onClick={() => onEvent(e)}>{evIcon(e)}{a === b ? "" : " " + e.title}</button>;
+                  })}
+                </React.Fragment>; })}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---- Stays: one person's year as a list of date ranges ----
+function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick }: {
+  S: SDay[]; people: Person[]; pd: Map<string, PDay>; tog: Record<string, boolean[]>; person: string; setPerson: (id: string) => void; canWrite: boolean;
+  onNote: (personId: string, days: string[], v: string) => void; onPick: (personId: string, a: string, b: string) => void;
+}) {
+  const p = people.find((x) => x.id === person) || people[0];
+  const rows = useMemo(() => {
+    const out: { a: string; b: string; days: string[]; place: string; loc: Loc | null; note: string; explicit: boolean; tg: number; hol: number; fl: string[] }[] = [];
+    if (!p) return out;
+    for (const s of S) {
+      const w = whereIs(p, s.d, pd); if (!w) continue;
+      const l = out[out.length - 1];
+      const tg = !p.is_self && tog[p.id][DAY_INDEX[s.d]] ? 1 : 0;
+      const fl = p.is_self && s.fl ? [s.fl === "E" ? "→EU" : "→MIA"] : [];
+      if (l && DAY_INDEX[l.b] + 1 === DAY_INDEX[s.d] && norm(l.place) === norm(w.place) && l.note === (w.note || "") && l.explicit === w.explicit) { l.b = s.d; l.days.push(s.d); l.tg += tg; l.hol += s.off ? 1 : 0; l.fl.push(...fl); }
+      else out.push({ a: s.d, b: s.d, days: [s.d], place: w.place, loc: w.loc, note: w.note || "", explicit: w.explicit, tg, hol: s.off ? 1 : 0, fl });
+    }
+    return out;
+  }, [S, p, pd, tog]);
+  if (!p) return null;
+  return (
+    <>
+      <div className="plan__layers">
+        <span className="lbl">Whose stays:</span>
+        {people.map((x) => <button key={x.id} className={"layer" + (x.id === p.id ? " is-on" : "")} onClick={() => setPerson(x.id)}><i className="pdot" style={{ background: x.color }} />{x.name}</button>)}
+      </div>
+      <div className="plan__tablewrap">
+        <table className="plan__ranges">
+          <thead><tr><th>From</th><th>To</th><th>Days</th><th>Place</th><th>{p.is_self ? "Flights" : "With you"}</th><th>School holiday</th><th>Note</th><th></th></tr></thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={8} className="no">Nothing entered for {p.name} yet.{canWrite ? " Pick dates in the Year or Timeline view, choose " + p.name + " under Who, then a place." : ""}</td></tr>}
+            {rows.map((r) => (
+              <tr key={r.a}>
+                <td className="n">{fmt(r.a)}</td><td className="n">{r.a === r.b ? "" : fmt(r.b)}</td><td className="n">{r.days.length}</td>
+                <td><span className="pill" style={{ background: r.loc ? LOC[r.loc].c : "#8a979e" }}>{r.place}</span>{!r.explicit ? <span className="meta"> home</span> : null}</td>
+                <td className="n">{p.is_self ? r.fl.join(" ") : r.tg === r.days.length ? <span className="yes">Yes</span> : r.tg ? `${r.tg} of ${r.days.length}` : <span className="no">—</span>}</td>
+                <td>{r.hol ? `★ ${r.hol === r.days.length ? "all" : r.hol}` : <span className="no">—</span>}</td>
+                <td>{r.explicit ? <NoteInput key={r.a + r.note} value={r.note} disabled={!canWrite} placeholder="Add a note for these days" onCommit={(v) => onNote(p.id, r.days, v)} /> : null}</td>
+                <td>{canWrite && <button className="btn mrg" onClick={() => onPick(p.id, r.a, r.b)}>Change</button>}</td>
               </tr>
-            );
-          })}
-        </tbody>
-      </table>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+function EventModal({ ev, cats, places, canWrite, onSave, onDelete, onClose }: { ev: PlanEvent; cats: Category[]; places: string[]; canWrite: boolean; onSave: (e: PlanEvent) => void; onDelete: (e: PlanEvent) => void; onClose: () => void }) {
+  const [e, setE] = useState<PlanEvent>(ev);
+  const [arm, setArm] = useState(false);
+  const cat = cats.find((c) => c.id === e.category_id);
+  const set = (patch: Partial<PlanEvent>) => setE((p) => ({ ...p, ...patch }));
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="modal" onClick={(x) => x.stopPropagation()}>
+        <div className="modal__head"><h2>{ev.id ? "Event" : "New event"}</h2><button className="xbtn" onClick={onClose}>✕</button></div>
+        <div className="modal__body">
+          <label className="fld"><span>What</span><input type="text" autoFocus value={e.title} disabled={!canWrite} placeholder="Tennis final, Forum, board meeting…" onChange={(x) => set({ title: x.target.value })} /></label>
+          <div className="fld2">
+            <label className="fld"><span>From</span><input type="date" value={e.start_day} min="2027-01-01" max="2027-12-31" disabled={!canWrite} onChange={(x) => set({ start_day: x.target.value, end_day: e.end_day < x.target.value ? x.target.value : e.end_day })} /></label>
+            <label className="fld"><span>To</span><input type="date" value={e.end_day} min={e.start_day} max="2027-12-31" disabled={!canWrite} onChange={(x) => set({ end_day: x.target.value })} /></label>
+          </div>
+          <div className="fld2">
+            <label className="fld"><span>Where</span><input type="text" list="plan-places" value={e.place || ""} disabled={!canWrite} placeholder={cat?.place ? `${cat.place} (from ${cat.name})` : "Barcelona"} onChange={(x) => set({ place: x.target.value })} /></label>
+            <label className="fld"><span>Type</span><select value={e.category_id || ""} disabled={!canWrite} onChange={(x) => set({ category_id: x.target.value || null })}><option value="">None</option>{cats.map((c) => <option key={c.id} value={c.id}>{c.icon} {c.name}</option>)}</select></label>
+          </div>
+          <datalist id="plan-places">{places.map((p) => <option key={p} value={p} />)}</datalist>
+          <label className="fld fld--row"><input type="checkbox" checked={e.must} disabled={!canWrite} onChange={(x) => set({ must: x.target.checked })} /> <span>I need to be there (warn me if my plan has me somewhere else)</span></label>
+          <label className="fld"><span>Note</span><input type="text" value={e.note || ""} disabled={!canWrite} onChange={(x) => set({ note: x.target.value })} /></label>
+          {canWrite && <div className="tedit__actions">
+            {ev.id && <button className="btn" onClick={() => { if (!arm) { setArm(true); setTimeout(() => setArm(false), 4000); return; } onDelete(ev); }}>{arm ? "Click again to delete" : "Delete"}</button>}
+            <button className="btn btn--primary" disabled={!e.title.trim() || !e.start_day || !e.end_day} onClick={() => onSave(e)}>Save</button>
+          </div>}
+        </div>
+      </div>
     </div>
   );
 }
@@ -426,7 +653,7 @@ function MembersModal({ calendarId, supabase, onClose }: { calendarId: string; s
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal__head"><h2>Invite &amp; permissions</h2><button className="xbtn" onClick={onClose}>✕</button></div>
         <div className="modal__body">
-          <p className="modal__hint">Editors can change days, notes and flags. Viewers see the live plan. People are added the first time they sign in with that exact email.</p>
+          <p className="modal__hint">Editors can change where people are, notes and events. Viewers see the live plan. People are added the first time they sign in with that exact email.</p>
           <div className="fld2" style={{ alignItems: "flex-end" }}>
             <label className="fld"><span>Email</span><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="milsy@example.com" onKeyDown={(e) => { if (e.key === "Enter") add(); }} /></label>
             <label className="fld"><span>Role</span><select value={roleNew} onChange={(e) => setRoleNew(e.target.value as any)}><option value="viewer">Viewer</option><option value="editor">Editor</option></select></label>
@@ -451,12 +678,13 @@ function MembersModal({ calendarId, supabase, onClose }: { calendarId: string; s
 
 const PALETTE = ["#b8860b", "#2a8f9d", "#c8562b", "#2f7d4f", "#7a3e8f", "#1f5fa8", "#b3261e", "#5f6b73"];
 
-function CategoriesModal({ calendarId, supabase, cats, setCats, onDelete, onClose }: {
+function CategoriesModal({ calendarId, supabase, cats, setCats, onClose }: {
   calendarId: string; supabase: any; cats: Category[];
-  setCats: React.Dispatch<React.SetStateAction<Category[]>>; onDelete: (id: string) => void; onClose: () => void;
+  setCats: React.Dispatch<React.SetStateAction<Category[]>>; onClose: () => void;
 }) {
   const [name, setName] = useState("");
   const [icon, setIcon] = useState("🏛️");
+  const [place, setPlace] = useState("");
   const [color, setColor] = useState(PALETTE[cats.length % PALETTE.length]);
   const [busy, setBusy] = useState(false);
   const [armDel, setArmDel] = useState<string | null>(null);
@@ -464,12 +692,12 @@ function CategoriesModal({ calendarId, supabase, cats, setCats, onDelete, onClos
     const n = name.trim(); if (!n) return;
     setBusy(true);
     const { data, error } = await supabase.from("plan_categories")
-      .insert({ calendar_id: calendarId, name: n, icon: icon.trim() || "•", color, sort: cats.length })
-      .select("id,name,icon,color,sort").single();
+      .insert({ calendar_id: calendarId, name: n, icon: icon.trim() || "•", color, place: place.trim() || null, sort: cats.length })
+      .select(CAT_SELECT).single();
     setBusy(false);
     if (error || !data) { alert(error?.message || "Could not add category"); return; }
     setCats((p) => (p.some((c) => c.id === data.id) ? p : [...p, data as Category]));
-    setName(""); setColor(PALETTE[(cats.length + 1) % PALETTE.length]);
+    setName(""); setPlace(""); setColor(PALETTE[(cats.length + 1) % PALETTE.length]);
   }
   async function update(c: Category, patch: Partial<Category>) {
     setCats((p) => p.map((x) => (x.id === c.id ? { ...x, ...patch } : x)));
@@ -478,7 +706,6 @@ function CategoriesModal({ calendarId, supabase, cats, setCats, onDelete, onClos
   }
   async function del(c: Category) {
     if (armDel !== c.id) { setArmDel(c.id); setTimeout(() => setArmDel(null), 4000); return; }
-    onDelete(c.id);
     setCats((p) => p.filter((x) => x.id !== c.id));
     const { error } = await supabase.from("plan_categories").delete().eq("id", c.id);
     if (error) alert(error.message);
@@ -486,22 +713,24 @@ function CategoriesModal({ calendarId, supabase, cats, setCats, onDelete, onClos
   return (
     <div className="overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal__head"><h2>Categories</h2><button className="xbtn" onClick={onClose}>✕</button></div>
+        <div className="modal__head"><h2>Event types</h2><button className="xbtn" onClick={onClose}>✕</button></div>
         <div className="modal__body">
-          <p className="modal__hint">Categories mark activities on days, like 🏛️ Forum. Each shows as an icon on its days and in the Activities view. They don&apos;t change where you are or any of the day counts.</p>
+          <p className="modal__hint">Types group events, like 🏛️ Forum, and give them an icon and colour. A usual place (e.g. Barcelona) applies to every event of that type that has no place of its own. Deleting a type keeps its events.</p>
           <div className="fld2" style={{ alignItems: "flex-end" }}>
             <label className="fld catico"><span>Icon</span><input type="text" value={icon} maxLength={8} onChange={(e) => setIcon(e.target.value)} /></label>
             <label className="fld"><span>Name</span><input type="text" value={name} placeholder="Forum" onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") add(); }} /></label>
+            <label className="fld"><span>Usual place</span><input type="text" value={place} placeholder="Barcelona" onChange={(e) => setPlace(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") add(); }} /></label>
             <label className="fld catcol"><span>Colour</span><input type="color" value={color} onChange={(e) => setColor(e.target.value)} /></label>
             <button className="btn btn--primary" onClick={add} disabled={busy || !name.trim()}>Add</button>
           </div>
-          <div className="sec-label">Your categories</div>
+          <div className="sec-label">Your types</div>
           {cats.length === 0 && <div className="empty">None yet.</div>}
           <div className="tmlist">
             {cats.map((c) => (
               <div className="tmrow catrow" key={c.id}>
                 <span className="catico"><NoteInput value={c.icon} disabled={false} placeholder="Icon" onCommit={(v) => update(c, { icon: v.trim() || "•" })} /></span>
                 <span className="tmrow__name"><NoteInput value={c.name} disabled={false} placeholder="Name" onCommit={(v) => { if (v.trim()) update(c, { name: v.trim() }); }} /></span>
+                <span className="tmrow__name"><NoteInput value={c.place || ""} disabled={false} placeholder="Usual place" onCommit={(v) => update(c, { place: v.trim() || null })} /></span>
                 <span className="catcol"><input type="color" value={c.color} onChange={(e) => update(c, { color: e.target.value })} /></span>
                 <button className="btn" onClick={() => del(c)}>{armDel === c.id ? "Tap again to delete" : "Delete"}</button>
               </div>
