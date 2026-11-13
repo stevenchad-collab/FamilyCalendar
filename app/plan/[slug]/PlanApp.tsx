@@ -652,6 +652,18 @@ function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick
     }
     write(ch);
   };
+  // delete a stay: other people go back to home / unknown; your own days join the stay before it
+  // (or the one after, at the start of the year) so your year never has a gap
+  const [armRow, setArmRow] = useState<string | null>(null);
+  const delTarget = (i: number) => (p.is_self ? (rows[i - 1] || rows[i + 1]) : undefined);
+  const del = (i: number) => {
+    const r = rows[i];
+    if (armRow !== r.a) { setArmRow(r.a); setTimeout(() => setArmRow((x) => (x === r.a ? null : x)), 4000); return; }
+    const nb = delTarget(i);
+    if (p.is_self && !nb) return;
+    write(r.days.map((d) => ({ person_id: p.id, day: d, row: nb ? vals(nb) : null })));
+    setArmRow(null);
+  };
   const explicitDays = rows.filter((r) => r.explicit).reduce((n, r) => n + r.days.length, 0);
   const resetAll = () => {
     if (!arm) { setArm(true); setTimeout(() => setArm(false), 4000); return; }
@@ -710,7 +722,8 @@ function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick
                   <td className="n">{p.is_self ? r.fl.join(" ") : r.tg === r.days.length ? <span className="yes">Yes</span> : r.tg ? `${r.tg} of ${r.days.length}` : <span className="no">—</span>}</td>
                   <td>{r.hol ? `★ ${r.hol === r.days.length ? "all" : r.hol}` : <span className="no">—</span>}</td>
                   <td>{r.explicit ? <NoteInput key={r.a + r.notes.join("|")} value={r.notes.join(" · ")} disabled={!canWrite} placeholder="Add a note for these days" onCommit={(v) => onNote(p.id, r.days, v)} /> : null}</td>
-                  <td>{canWrite && <button className="btn mrg" onClick={() => onPick(p.id, r.a, r.b)}>{r.explicit ? "Change place" : "Change"}</button>}</td>
+                  <td className="n">{canWrite && <button className="btn mrg" onClick={() => onPick(p.id, r.a, r.b)}>{r.explicit ? "Change place" : "Change"}</button>}
+                    {edit && (!p.is_self || rows.length > 1) && <button className="btn mrg" style={{ marginLeft: 6 }} onClick={() => del(i)}>{armRow === r.a ? (p.is_self ? `Click again: becomes ${delTarget(i)!.place}` : "Click again to delete") : "Delete"}</button>}</td>
                 </tr>
               );
             })}
