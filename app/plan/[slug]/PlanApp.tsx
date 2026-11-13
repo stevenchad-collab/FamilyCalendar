@@ -600,13 +600,19 @@ function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick
   const p = people.find((x) => x.id === person) || people[0];
   const [arm, setArm] = useState(false);
   const [nw, setNw] = useState<{ a: string; b: string; place: string; loc: Loc | ""; note: string }>({ a: "", b: "", place: "", loc: "", note: "" });
+  // who the new stay is for: the person being viewed, plus anyone else ticked
+  const [nwExtra, setNwExtra] = useState<Set<string>>(new Set());
+  const nwFor = people.filter((x) => (p && x.id === p.id) || nwExtra.has(x.id));
   const nwOk = DAY_INDEX[nw.a] !== undefined && DAY_INDEX[nw.b] !== undefined && nw.a <= nw.b && !!nw.place.trim() && !!nw.loc;
   const setPlace = (v: string) => { const k = places.find((x) => norm(x.place) === norm(v)); setNw((o) => ({ ...o, place: v, loc: k ? k.loc : o.loc })); };
   const addStay = () => {
     if (!nwOk || !p) return;
     const note = nw.note.trim() || null;
-    const home = !!p.default_place && norm(p.default_place) === norm(nw.place) && !note;
-    write(DAYS.slice(DAY_INDEX[nw.a], DAY_INDEX[nw.b] + 1).map((d) => ({ person_id: p.id, day: d, row: home ? null : { place: nw.place.trim(), loc: nw.loc as Loc, note } })));
+    const days = DAYS.slice(DAY_INDEX[nw.a], DAY_INDEX[nw.b] + 1);
+    write(nwFor.flatMap((x) => {
+      const home = !!x.default_place && norm(x.default_place) === norm(nw.place) && !note;
+      return days.map((d) => ({ person_id: x.id, day: d, row: home ? null : { place: nw.place.trim(), loc: nw.loc as Loc, note } }));
+    }));
     setNw({ a: "", b: "", place: "", loc: "", note: "" });
   };
   // one row per run of consecutive days in the same place (notes do not split a stay)
@@ -664,6 +670,16 @@ function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick
           <thead><tr><th>From</th><th>To</th><th>Days</th><th>Place</th><th>{p.is_self ? "Flights" : "With you"}</th><th>School holiday</th><th>Note</th><th></th></tr></thead>
           <tbody>
             {canWrite && (
+              <tr className="addrow addrow--who">
+                <td colSpan={8}>
+                  <span className="dcell">
+                    <span className="lbl">New stay for</span>
+                    {people.map((x) => { const on = x.id === p.id || nwExtra.has(x.id); return <button key={x.id} className={"layer" + (on ? " is-on" : "")} aria-pressed={on} disabled={x.id === p.id} title={x.id === p.id ? "The person whose stays you are viewing" : "Also add this stay for " + x.name} onClick={() => setNwExtra((o) => { const n = new Set(o); if (n.has(x.id)) n.delete(x.id); else n.add(x.id); return n; })}><i className="pdot" style={{ background: x.color }} />{x.name}</button>; })}
+                  </span>
+                </td>
+              </tr>
+            )}
+            {canWrite && (
               <tr className="addrow">
                 <td className="n"><input type="date" aria-label="New stay from" value={nw.a} min={DAYS[0]} max={DAYS[DAYS.length - 1]} onChange={(e) => setNw((o) => ({ ...o, a: e.target.value, b: !o.b || o.b < e.target.value ? e.target.value : o.b }))} /></td>
                 <td className="n"><input type="date" aria-label="New stay to" value={nw.b} min={nw.a || DAYS[0]} max={DAYS[DAYS.length - 1]} onChange={(e) => setNw((o) => ({ ...o, b: e.target.value }))} /></td>
@@ -678,7 +694,7 @@ function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick
                   <datalist id="stay-places">{places.map((x) => <option key={x.place} value={x.place} />)}</datalist>
                 </td>
                 <td><input type="text" aria-label="Note" placeholder="Note (optional)" value={nw.note} onChange={(e) => setNw((o) => ({ ...o, note: e.target.value }))} onKeyDown={(e) => { if (e.key === "Enter") addStay(); }} /></td>
-                <td><button className="btn btn--primary mrg" disabled={!nwOk} onClick={addStay}>＋ Add stay</button></td>
+                <td><button className="btn btn--primary mrg" disabled={!nwOk} onClick={addStay}>＋ Add stay{nwFor.length > 1 ? ` for ${nwFor.length}` : ""}</button></td>
               </tr>
             )}
             {rows.length === 0 && <tr><td colSpan={8} className="no">Nothing entered for {p.name} yet.{canWrite ? " Use the row above to add a stay." : ""}</td></tr>}
