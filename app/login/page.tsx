@@ -16,7 +16,8 @@ export default function Login() {
     setErr("");
     try {
       const supabase = createClient();
-      const site = process.env.NEXT_PUBLIC_SITE_URL || window.location.origin;
+      // send the link back to whichever address this page is on (production or a Vercel preview)
+      const site = window.location.origin || process.env.NEXT_PUBLIC_SITE_URL;
       const { error } = await supabase.auth.signInWithOtp({
         email,
         options: { emailRedirectTo: `${site}/auth/callback` },

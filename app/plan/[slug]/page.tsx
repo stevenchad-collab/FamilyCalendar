@@ -1,11 +1,60 @@
 import { redirect, notFound } from "next/navigation";
 import { createServerSupabase, createServiceClient } from "@/lib/supabase/server";
 import { SEED } from "@/lib/plan2027";
-import PlanApp, { type PlanRow, type Category } from "./PlanApp";
+import { convert, SEED_PEOPLE, type LegacyRow } from "@/lib/planConvert";
+import type { Person, PDay, PlanEvent, Category } from "@/lib/plan";
+import PlanApp from "./PlanApp";
 import "../plan.css";
 
 const OWNER_EMAIL = "stevenchad@gmail.com";
 const DEFAULT_SLUG = "steve-2027";
+const PEOPLE_SELECT = "id,name,color,sort,is_self,default_place,default_loc";
+
+function Notice({ title, text }: { title: string; text: string }) {
+  return <div className="app plan"><main className="plan__main"><h2>{title}</h2><p className="plan__note">{text}</p></main></div>;
+}
+
+// read every row of a table for one calendar (PostgREST caps a single request at 1000 rows)
+async function fetchAll<T>(client: any, table: string, select: string, calendarId: string, order: string[]): Promise<T[]> {
+  const out: T[] = [];
+  for (let from = 0; ; from += 1000) {
+    let q = client.from(table).select(select).eq("calendar_id", calendarId);
+    for (const o of order) q = q.order(o);
+    const { data, error } = await q.range(from, from + 999);
+    if (error) throw new Error(error.message);
+    out.push(...((data || []) as T[]));
+    if (!data || data.length < 1000) break;
+  }
+  return out;
+}
+
+// One-time upgrade: copy the v1 plan (built-in base + plan_days edits) into the per-person tables.
+// plan_days is left untouched as a backup.
+async function upgradeToPeople(admin: any, calendarId: string, userId: string) {
+  const { data: people, error } = await admin.from("plan_people")
+    .insert(SEED_PEOPLE.map((p) => ({ ...p, calendar_id: calendarId }))).select(PEOPLE_SELECT);
+  if (error || !people) return; // someone else is already doing it (unique name per calendar)
+  try {
+    const legacy = await fetchAll<LegacyRow>(admin, "plan_days", "day,loc,note,fam,mi,cats", calendarId, ["day"]);
+    const { data: cats } = await admin.from("plan_categories").select("id,name").eq("calendar_id", calendarId);
+    const names = Object.fromEntries((cats || []).map((c: any) => [c.id, c.name]));
+    const c = convert(legacy, people as Person[], names);
+    const rows = c.days.map((d) => ({ ...d, calendar_id: calendarId, updated_by: userId }));
+    for (let i = 0; i < rows.length; i += 500) {
+      const { error: e } = await admin.from("plan_person_days").insert(rows.slice(i, i + 500));
+      if (e) throw new Error(e.message);
+    }
+    if (c.events.length) {
+      const { error: e } = await admin.from("plan_events").insert(c.events.map((ev) => ({ ...ev, calendar_id: calendarId, updated_by: userId })));
+      if (e) throw new Error(e.message);
+    }
+  } catch (err) {
+    // leave nothing half-done: removing the people cascades to their days, so the next visit retries
+    await admin.from("plan_events").delete().eq("calendar_id", calendarId);
+    await admin.from("plan_people").delete().eq("calendar_id", calendarId);
+    throw err;
+  }
+}
 
 export default async function Page({ params }: { params: { slug: string } }) {
   const supabase = createServerSupabase();
@@ -37,19 +86,32 @@ export default async function Page({ params }: { params: { slug: string } }) {
   if (!cal) notFound();
   if (cal.kind !== "plan") redirect(`/c/${cal.slug}`);
 
-  const [{ data: member }, { data: rows }, { data: calList }, { data: catRows }] = await Promise.all([
-    supabase.from("calendar_members").select("role").eq("calendar_id", cal.id).eq("user_id", user.id).maybeSingle(),
-    supabase.from("plan_days").select("day,loc,note,fam,mi,cats").eq("calendar_id", cal.id),
-    supabase.from("calendars").select("id,name,slug,kind").order("created_at"),
-    supabase.from("plan_categories").select("id,name,icon,color,sort").eq("calendar_id", cal.id).order("sort").order("created_at"),
-  ]);
+  const { data: member } = await supabase.from("calendar_members").select("role").eq("calendar_id", cal.id).eq("user_id", user.id).maybeSingle();
   const role = (member?.role as "owner" | "editor" | "viewer" | undefined) || "viewer";
+
+  const { data: people, error: pErr } = await supabase.from("plan_people").select(PEOPLE_SELECT).eq("calendar_id", cal.id).order("sort");
+  if (pErr) return <Notice title="One step left" text="This version of the plan needs the database update in supabase/migrations/0004_plan_people_events.sql. Run it in the Supabase SQL Editor, then reload this page." />;
+  if (!people || people.length === 0) {
+    if (role !== "owner") return <Notice title="Plan is being upgraded" text="The owner needs to open this page once to finish the upgrade. Please check back shortly." />;
+    await upgradeToPeople(createServiceClient(), cal.id, user.id);
+    // reload rather than re-query: an identical read in the same render is served from React's request cache (still empty)
+    redirect(`/plan/${cal.slug}`);
+  }
+
+  const [days, { data: evRows }, { data: calList }, { data: catRows }] = await Promise.all([
+    fetchAll<PDay>(supabase, "plan_person_days", "person_id,day,place,loc,note", cal.id, ["person_id", "day"]),
+    supabase.from("plan_events").select("id,title,start_day,end_day,place,category_id,must,note").eq("calendar_id", cal.id),
+    supabase.from("calendars").select("id,name,slug,kind").order("created_at"),
+    supabase.from("plan_categories").select("id,name,icon,color,sort,place").eq("calendar_id", cal.id).order("sort").order("created_at"),
+  ]);
 
   return (
     <PlanApp
       calendar={{ id: cal.id, name: cal.name, slug: cal.slug, ownerId: cal.owner_id }}
       role={role}
-      initialRows={(rows || []) as PlanRow[]}
+      people={(people || []) as Person[]}
+      initialDays={days}
+      initialEvents={(evRows || []) as PlanEvent[]}
       initialCategories={(catRows || []) as Category[]}
       allCalendars={(calList || []).map((c: any) => ({ id: c.id, name: c.name, slug: c.slug, kind: c.kind || "events" }))}
       userEmail={user.email || ""}
