@@ -394,7 +394,7 @@ export default function PlanApp({ calendar, role, people, initialDays, initialEv
 
         {view === "stays" && <Stays S={S} people={people} pd={pd} tog={tog} person={staysPerson} setPerson={setStaysPerson} canWrite={canWrite}
           onNote={(pid, days, v) => writeDays(days.map((d) => { const r = pd.get(key(pid, d))!; return { person_id: pid, day: d, row: { place: r.place, loc: r.loc, note: v.trim() || null } }; }))}
-          onPick={(pid, a, b) => { select(a, b); setSelPeople(new Set([pid])); }} write={writeDays} />}
+          onPick={(pid, a, b) => { select(a, b); setSelPeople(new Set([pid])); }} write={writeDays} places={places} />}
 
         {view === "events" && (
           <div className="plan__tablewrap">
@@ -588,12 +588,22 @@ function DateBox({ value, min, max, disabled, onCommit, label }: { value: string
     onBlur={() => commit(v)} onKeyDown={(e) => { if (e.key === "Enter") commit(v); }} />;
 }
 
-function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick, write }: {
+function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick, write, places }: {
   S: SDay[]; people: Person[]; pd: Map<string, PDay>; tog: Record<string, boolean[]>; person: string; setPerson: (id: string) => void; canWrite: boolean;
-  onNote: (personId: string, days: string[], v: string) => void; onPick: (personId: string, a: string, b: string) => void; write: (c: Change[]) => void;
+  onNote: (personId: string, days: string[], v: string) => void; onPick: (personId: string, a: string, b: string) => void; write: (c: Change[]) => void; places: { place: string; loc: Loc }[];
 }) {
   const p = people.find((x) => x.id === person) || people[0];
   const [arm, setArm] = useState(false);
+  const [nw, setNw] = useState<{ a: string; b: string; place: string; loc: Loc | ""; note: string }>({ a: "", b: "", place: "", loc: "", note: "" });
+  const nwOk = DAY_INDEX[nw.a] !== undefined && DAY_INDEX[nw.b] !== undefined && nw.a <= nw.b && !!nw.place.trim() && !!nw.loc;
+  const setPlace = (v: string) => { const k = places.find((x) => norm(x.place) === norm(v)); setNw((o) => ({ ...o, place: v, loc: k ? k.loc : o.loc })); };
+  const addStay = () => {
+    if (!nwOk || !p) return;
+    const note = nw.note.trim() || null;
+    const home = !!p.default_place && norm(p.default_place) === norm(nw.place) && !note;
+    write(DAYS.slice(DAY_INDEX[nw.a], DAY_INDEX[nw.b] + 1).map((d) => ({ person_id: p.id, day: d, row: home ? null : { place: nw.place.trim(), loc: nw.loc as Loc, note } })));
+    setNw({ a: "", b: "", place: "", loc: "", note: "" });
+  };
   // one row per run of consecutive days in the same place (notes do not split a stay)
   const rows = useMemo(() => {
     const out: StayRow[] = [];
@@ -648,7 +658,25 @@ function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick
         <table className="plan__ranges">
           <thead><tr><th>From</th><th>To</th><th>Days</th><th>Place</th><th>{p.is_self ? "Flights" : "With you"}</th><th>School holiday</th><th>Note</th><th></th></tr></thead>
           <tbody>
-            {rows.length === 0 && <tr><td colSpan={8} className="no">Nothing entered for {p.name} yet.{canWrite ? " Pick dates in the Year or Timeline view, choose " + p.name + " under Who, then a place." : ""}</td></tr>}
+            {canWrite && (
+              <tr className="addrow">
+                <td className="n"><input type="date" aria-label="New stay from" value={nw.a} min={DAYS[0]} max={DAYS[DAYS.length - 1]} onChange={(e) => setNw((o) => ({ ...o, a: e.target.value, b: !o.b || o.b < e.target.value ? e.target.value : o.b }))} /></td>
+                <td className="n"><input type="date" aria-label="New stay to" value={nw.b} min={nw.a || DAYS[0]} max={DAYS[DAYS.length - 1]} onChange={(e) => setNw((o) => ({ ...o, b: e.target.value }))} /></td>
+                <td className="n">{nwOk ? DAY_INDEX[nw.b] - DAY_INDEX[nw.a] + 1 : ""}</td>
+                <td colSpan={3}>
+                  <span className="dcell">
+                    <input type="text" className="place" list="stay-places" aria-label="Place" placeholder="Place" value={nw.place} onChange={(e) => setPlace(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addStay(); }} />
+                    <select aria-label="Country" value={nw.loc} onChange={(e) => setNw((o) => ({ ...o, loc: e.target.value as Loc | "" }))}>
+                      <option value="">Country…</option>{(Object.keys(LOC) as Loc[]).map((k) => <option key={k} value={k}>{LOC[k].name}</option>)}
+                    </select>
+                  </span>
+                  <datalist id="stay-places">{places.map((x) => <option key={x.place} value={x.place} />)}</datalist>
+                </td>
+                <td><input type="text" aria-label="Note" placeholder="Note (optional)" value={nw.note} onChange={(e) => setNw((o) => ({ ...o, note: e.target.value }))} onKeyDown={(e) => { if (e.key === "Enter") addStay(); }} /></td>
+                <td><button className="btn btn--primary mrg" disabled={!nwOk} onClick={addStay}>＋ Add stay</button></td>
+              </tr>
+            )}
+            {rows.length === 0 && <tr><td colSpan={8} className="no">Nothing entered for {p.name} yet.{canWrite ? " Use the row above to add a stay." : ""}</td></tr>}
             {rows.map((r, i) => {
               const edit = canWrite && r.explicit;
               const dow = (d: string) => new Date(d + "T12:00:00").toLocaleDateString("en-GB", { weekday: "short" });
