@@ -394,7 +394,7 @@ export default function PlanApp({ calendar, role, people, initialDays, initialEv
 
         {view === "stays" && <Stays S={S} people={people} pd={pd} tog={tog} person={staysPerson} setPerson={setStaysPerson} canWrite={canWrite}
           onNote={(pid, days, v) => writeDays(days.map((d) => { const r = pd.get(key(pid, d))!; return { person_id: pid, day: d, row: { place: r.place, loc: r.loc, note: v.trim() || null } }; }))}
-          onPick={(pid, a, b) => { select(a, b); setSelPeople(new Set([pid])); }} />}
+          onPick={(pid, a, b) => { select(a, b); setSelPeople(new Set([pid])); }} write={writeDays} />}
 
         {view === "events" && (
           <div className="plan__tablewrap">
@@ -429,6 +429,11 @@ export default function PlanApp({ calendar, role, people, initialDays, initialEv
         <div className="plan__sheet">
           <div className="row">
             <span className="title">{range.a === range.b ? fmt(range.a, true) : `${fmtRange(range.a, range.b)} · ${range.days.length} days`}</span>
+            <span className="dates">
+              <input type="date" aria-label="From" value={range.a} min={DAYS[0]} max={DAYS[DAYS.length - 1]} onChange={(e) => { const v = e.target.value; if (DAY_INDEX[v] === undefined) return; setSelA(v); setSelB(v > range.b ? v : range.b); }} />
+              <span>to</span>
+              <input type="date" aria-label="To" value={range.b} min={DAYS[0]} max={DAYS[DAYS.length - 1]} onChange={(e) => { const v = e.target.value; if (DAY_INDEX[v] === undefined) return; setSelA(v < range.a ? v : range.a); setSelB(v); }} />
+            </span>
             {selInfo && <span className="meta">
               {selInfo.place} ({LOC[selInfo.loc].name}){selInfo.fl ? (selInfo.fl === "E" ? " · fly Miami → Europe tonight" : " · fly Europe → Miami") : ""}{selInfo.off ? " · ★ " + selInfo.off : ""}
               {others.map((p) => { const w = whereIs(p, selInfo.d, pd); return w ? ` · ${p.name}: ${w.place}` : ""; }).join("")}
@@ -568,49 +573,102 @@ function Timeline({ S, people, pd, tog, layers, sortedEvents, catMap, conflictDa
 }
 
 // ---- Stays: one person's year as a list of date ranges ----
-function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick }: {
+type StayRow = { a: string; b: string; days: string[]; place: string; loc: Loc | null; notes: string[]; explicit: boolean; tg: number; hol: number; fl: string[] };
+type Change = { person_id: string; day: string; row: Omit<PDay, "person_id" | "day"> | null };
+
+// date box that commits when you stop typing/picking (or leave the field), so half-typed dates never move a stay
+function DateBox({ value, min, max, disabled, onCommit, label }: { value: string; min?: string; max?: string; disabled?: boolean; onCommit: (v: string) => void; label: string }) {
+  const [v, setV] = useState(value);
+  const t = useRef<any>(null);
+  useEffect(() => { setV(value); }, [value]);
+  const ok = (x: string) => DAY_INDEX[x] !== undefined && (!min || x >= min) && (!max || x <= max);
+  const commit = (x: string) => { clearTimeout(t.current); if (x && x !== value && ok(x)) onCommit(x); else if (x !== value) setV(value); };
+  return <input type="date" aria-label={label} value={v} min={min} max={max} disabled={disabled}
+    onChange={(e) => { const x = e.target.value; setV(x); clearTimeout(t.current); t.current = setTimeout(() => commit(x), 900); }}
+    onBlur={() => commit(v)} onKeyDown={(e) => { if (e.key === "Enter") commit(v); }} />;
+}
+
+function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick, write }: {
   S: SDay[]; people: Person[]; pd: Map<string, PDay>; tog: Record<string, boolean[]>; person: string; setPerson: (id: string) => void; canWrite: boolean;
-  onNote: (personId: string, days: string[], v: string) => void; onPick: (personId: string, a: string, b: string) => void;
+  onNote: (personId: string, days: string[], v: string) => void; onPick: (personId: string, a: string, b: string) => void; write: (c: Change[]) => void;
 }) {
   const p = people.find((x) => x.id === person) || people[0];
+  const [arm, setArm] = useState(false);
+  // one row per run of consecutive days in the same place (notes do not split a stay)
   const rows = useMemo(() => {
-    const out: { a: string; b: string; days: string[]; place: string; loc: Loc | null; note: string; explicit: boolean; tg: number; hol: number; fl: string[] }[] = [];
+    const out: StayRow[] = [];
     if (!p) return out;
     for (const s of S) {
       const w = whereIs(p, s.d, pd); if (!w) continue;
       const l = out[out.length - 1];
       const tg = !p.is_self && tog[p.id][DAY_INDEX[s.d]] ? 1 : 0;
       const fl = p.is_self && s.fl ? [s.fl === "E" ? "→EU" : "→MIA"] : [];
-      if (l && DAY_INDEX[l.b] + 1 === DAY_INDEX[s.d] && norm(l.place) === norm(w.place) && l.note === (w.note || "") && l.explicit === w.explicit) { l.b = s.d; l.days.push(s.d); l.tg += tg; l.hol += s.off ? 1 : 0; l.fl.push(...fl); }
-      else out.push({ a: s.d, b: s.d, days: [s.d], place: w.place, loc: w.loc, note: w.note || "", explicit: w.explicit, tg, hol: s.off ? 1 : 0, fl });
+      if (l && DAY_INDEX[l.b] + 1 === DAY_INDEX[s.d] && norm(l.place) === norm(w.place) && l.explicit === w.explicit) {
+        l.b = s.d; l.days.push(s.d); l.tg += tg; l.hol += s.off ? 1 : 0; l.fl.push(...fl);
+        if (w.note && !l.notes.includes(w.note)) l.notes.push(w.note);
+      } else out.push({ a: s.d, b: s.d, days: [s.d], place: w.place, loc: w.loc, notes: w.note ? [w.note] : [], explicit: w.explicit, tg, hol: s.off ? 1 : 0, fl });
     }
     return out;
   }, [S, p, pd, tog]);
   if (!p) return null;
+
+  const vals = (r: StayRow) => ({ place: r.place, loc: r.loc, note: r.notes.length === 1 ? r.notes[0] : null });
+  // move a stay's start or end. Days it grows into take its place; days it gives up go to the
+  // neighbouring stay (for people with a home base, or no neighbour, they go back to home / unknown).
+  const move = (i: number, a: string, b: string) => {
+    const r = rows[i];
+    if (a > b) return; // a stay cannot end before it starts
+    const ch: Change[] = [];
+    const prev = rows[i - 1], next = rows[i + 1];
+    for (let k = DAY_INDEX[a]; k <= DAY_INDEX[b]; k++) if (DAYS[k] < r.a || DAYS[k] > r.b) ch.push({ person_id: p.id, day: DAYS[k], row: vals(r) });
+    for (const d of r.days) {
+      if (d >= a && d <= b) continue;
+      const nb = d < a ? prev : next;
+      const adjacent = nb && nb.explicit && (d < a ? DAY_INDEX[nb.b] + 1 === DAY_INDEX[r.a] : DAY_INDEX[r.b] + 1 === DAY_INDEX[nb.a]);
+      if (adjacent) ch.push({ person_id: p.id, day: d, row: vals(nb!) });
+      else if (!p.is_self) ch.push({ person_id: p.id, day: d, row: null });
+      // for Steve with no neighbouring stay, leave the day as it is rather than create a gap
+    }
+    write(ch);
+  };
+  const explicitDays = rows.filter((r) => r.explicit).reduce((n, r) => n + r.days.length, 0);
+  const resetAll = () => {
+    if (!arm) { setArm(true); setTimeout(() => setArm(false), 4000); return; }
+    write(rows.filter((r) => r.explicit).flatMap((r) => r.days.map((d) => ({ person_id: p.id, day: d, row: null }))));
+    setArm(false);
+  };
   return (
     <>
       <div className="plan__layers">
         <span className="lbl">Whose stays:</span>
-        {people.map((x) => <button key={x.id} className={"layer" + (x.id === p.id ? " is-on" : "")} onClick={() => setPerson(x.id)}><i className="pdot" style={{ background: x.color }} />{x.name}</button>)}
+        {people.map((x) => <button key={x.id} className={"layer" + (x.id === p.id ? " is-on" : "")} onClick={() => { setPerson(x.id); setArm(false); }}><i className="pdot" style={{ background: x.color }} />{x.name}</button>)}
+        {canWrite && !p.is_self && explicitDays > 0 && <button className="btn mrg" style={{ marginLeft: "auto" }} onClick={resetAll}>{arm ? `Click again: clears ${explicitDays} days` : p.default_place ? `Reset ${p.name} to ${p.default_place} all year` : `Clear all of ${p.name}'s stays`}</button>}
       </div>
       <div className="plan__tablewrap">
         <table className="plan__ranges">
           <thead><tr><th>From</th><th>To</th><th>Days</th><th>Place</th><th>{p.is_self ? "Flights" : "With you"}</th><th>School holiday</th><th>Note</th><th></th></tr></thead>
           <tbody>
             {rows.length === 0 && <tr><td colSpan={8} className="no">Nothing entered for {p.name} yet.{canWrite ? " Pick dates in the Year or Timeline view, choose " + p.name + " under Who, then a place." : ""}</td></tr>}
-            {rows.map((r) => (
-              <tr key={r.a}>
-                <td className="n">{fmt(r.a)}</td><td className="n">{r.a === r.b ? "" : fmt(r.b)}</td><td className="n">{r.days.length}</td>
-                <td><span className="pill" style={{ background: r.loc ? LOC[r.loc].c : "#8a979e" }}>{r.place}</span>{!r.explicit ? <span className="meta"> home</span> : null}</td>
-                <td className="n">{p.is_self ? r.fl.join(" ") : r.tg === r.days.length ? <span className="yes">Yes</span> : r.tg ? `${r.tg} of ${r.days.length}` : <span className="no">—</span>}</td>
-                <td>{r.hol ? `★ ${r.hol === r.days.length ? "all" : r.hol}` : <span className="no">—</span>}</td>
-                <td>{r.explicit ? <NoteInput key={r.a + r.note} value={r.note} disabled={!canWrite} placeholder="Add a note for these days" onCommit={(v) => onNote(p.id, r.days, v)} /> : null}</td>
-                <td>{canWrite && <button className="btn mrg" onClick={() => onPick(p.id, r.a, r.b)}>Change</button>}</td>
-              </tr>
-            ))}
+            {rows.map((r, i) => {
+              const edit = canWrite && r.explicit;
+              const dow = (d: string) => new Date(d + "T12:00:00").toLocaleDateString("en-GB", { weekday: "short" });
+              return (
+                <tr key={r.a + r.place}>
+                  <td className="n">{edit ? <span className="dcell"><i>{dow(r.a)}</i><DateBox label="From" value={r.a} min={DAYS[0]} max={r.b} onCommit={(v) => move(i, v, r.b)} /></span> : fmt(r.a)}</td>
+                  <td className="n">{edit ? <span className="dcell"><i>{dow(r.b)}</i><DateBox label="To" value={r.b} min={r.a} max={DAYS[DAYS.length - 1]} onCommit={(v) => move(i, r.a, v)} /></span> : r.a === r.b ? "" : fmt(r.b)}</td>
+                  <td className="n">{r.days.length}</td>
+                  <td><span className="pill" style={{ background: r.loc ? LOC[r.loc].c : "#8a979e" }}>{r.place}</span>{!r.explicit ? <span className="meta"> home</span> : null}</td>
+                  <td className="n">{p.is_self ? r.fl.join(" ") : r.tg === r.days.length ? <span className="yes">Yes</span> : r.tg ? `${r.tg} of ${r.days.length}` : <span className="no">—</span>}</td>
+                  <td>{r.hol ? `★ ${r.hol === r.days.length ? "all" : r.hol}` : <span className="no">—</span>}</td>
+                  <td>{r.explicit ? <NoteInput key={r.a + r.notes.join("|")} value={r.notes.join(" · ")} disabled={!canWrite} placeholder="Add a note for these days" onCommit={(v) => onNote(p.id, r.days, v)} /> : null}</td>
+                  <td>{canWrite && <button className="btn mrg" onClick={() => onPick(p.id, r.a, r.b)}>{r.explicit ? "Change place" : "Change"}</button>}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
+      {canWrite && <p className="plan__note">Change a From or To date to move where a stay begins or ends: the stay next to it grows or shrinks to match, so there are never gaps or overlaps. Consecutive days in the same place are always one stay.</p>}
     </>
   );
 }
