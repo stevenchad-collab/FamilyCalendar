@@ -424,7 +424,8 @@ export default function PlanApp({ calendar, role, people, initialDays, initialEv
               {(evByDay[selInfo.d] || []).map((e) => ` · ${evIcon(e)} ${e.title}`).join("")}
             </span>}
             {!selInfo && !selB && <span className="meta">Click another day to finish the range</span>}
-            <button className="btn x" onClick={() => select(null)}>Close</button>
+            {canWrite && <span className={"meta plan__status--" + status.kind}>{status.text || "Changes save as you make them"}</span>}
+            <button className="btn x" onClick={() => select(null)}>Done</button>
           </div>
           {canWrite && <>
             <div className="row">
@@ -441,12 +442,13 @@ export default function PlanApp({ calendar, role, people, initialDays, initialEv
                 ? <button className="btn" disabled={!selPeople.size} onClick={() => setOther("")}>Somewhere else…</button>
                 : <>
                     <input type="text" className="short" autoFocus value={other} placeholder="Place, e.g. Lisbon" onChange={(e) => setOther(e.target.value)} />
+                    <span className="meta">then pick the country to save:</span>
                     {(Object.keys(LOC) as Loc[]).map((k) => <button key={k} className="locbtn" style={{ ["--c" as any]: LOC[k].c }} disabled={!other.trim()} onClick={() => applyPlace(other, k)}>in {LOC[k].name}</button>)}
                   </>}
             </div>
             <div className="row">
               <span className="lbl">Note</span>
-              <input type="text" value={noteDraft} placeholder="Optional note for these days (Enter to save)" onChange={(e) => setNoteDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); applyNote(noteDraft); } }} />
+              <input type="text" value={noteDraft} placeholder="Optional note for these days" onChange={(e) => setNoteDraft(e.target.value)} onBlur={() => applyNote(noteDraft)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); applyNote(noteDraft); } }} />
               {others.some((p) => selPeople.has(p.id) && range.days.some((d) => pd.has(key(p.id, d)))) && <button className="btn" onClick={clearSel}>Clear (back to home / unknown)</button>}
               <button className="btn" onClick={() => setEvEdit(newEvent(range.a, range.b))}>＋ Event on {range.a === range.b ? "this day" : "these days"}</button>
             </div>
