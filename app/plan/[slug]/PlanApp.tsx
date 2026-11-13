@@ -63,7 +63,8 @@ export default function PlanApp({ calendar, role, people, initialDays, initialEv
 
   // remember layer choices per browser
   useEffect(() => {
-    try { const s = localStorage.getItem("plan-layers:" + calendar.id); if (s) setLayers(new Set(JSON.parse(s))); } catch {}
+    try { const s = localStorage.getItem("plan-layers:" + calendar.id); if (s) setLayers(new Set(JSON.parse(s)));
+      if (!localStorage.getItem("plan-layers-v2:" + calendar.id)) { localStorage.setItem("plan-layers-v2:" + calendar.id, "1"); setLayers((p) => new Set([...Array.from(p), "ev", "hol"])); } } catch {}
   }, [calendar.id]);
   const toggleLayer = (id: string) => setLayers((p) => {
     const n = new Set(p); if (n.has(id)) n.delete(id); else n.add(id);
@@ -399,14 +400,15 @@ export default function PlanApp({ calendar, role, people, initialDays, initialEv
 
         {view === "stays" && <Stays S={S} people={people} pd={pd} tog={tog} person={staysPerson} setPerson={setStaysPerson} canWrite={canWrite}
           onNote={(pid, days, v) => writeDays(days.map((d) => { const r = pd.get(key(pid, d))!; return { person_id: pid, day: d, row: { place: r.place, loc: r.loc, note: v.trim() || null } }; }))}
-          onPick={(pid, a, b) => { select(a, b); setSelPeople(new Set([pid])); }} write={writeDays} places={places} />}
+          onPick={(pid, a, b) => { select(a, b); setSelPeople(new Set([pid])); }} write={writeDays} places={places} evByDay={evByDay} evIcon={evIcon} conflictDays={conflictDays} onEvent={(e) => setEvEdit(e)} />}
 
         {view === "events" && (
           <div className="plan__tablewrap">
+            {canWrite && <div className="plan__layers"><button className="btn btn--primary" onClick={() => setEvEdit(newEvent(DAYS[0], DAYS[0]))}>＋ Add event</button><span className="meta">Click any event to edit or delete it. Events show in the Year and Timeline views when “◆ Events” is switched on, and in the Stays list.</span></div>}
             <table className="plan__ranges">
-              <thead><tr><th>When</th><th>Event</th><th>Where</th><th>Type</th><th>Must be there</th><th>Status</th></tr></thead>
+              <thead><tr><th>When</th><th>Event</th><th>Where</th><th>Type</th><th>Must be there</th><th>Status</th><th></th></tr></thead>
               <tbody>
-                {sortedEvents.length === 0 && <tr><td colSpan={6} className="no">No events yet.{canWrite ? " Use ＋ Event to add a match, forum day or anything you want to be in town for." : ""}</td></tr>}
+                {sortedEvents.length === 0 && <tr><td colSpan={7} className="no">No events yet.{canWrite ? " Use ＋ Event to add a match, forum day or anything you want to be in town for." : ""}</td></tr>}
                 {sortedEvents.map((e) => {
                   const place = eventPlace(e, catMap);
                   const bad = DAYS.slice(DAY_INDEX[e.start_day], DAY_INDEX[e.end_day] + 1).filter((d) => conflictDays.has(d));
@@ -419,6 +421,7 @@ export default function PlanApp({ calendar, role, people, initialDays, initialEv
                       <td>{c ? <span className="pill" style={{ background: c.color }}>{c.icon} {c.name}</span> : <span className="no">—</span>}</td>
                       <td>{e.must ? "Yes" : <span className="no">Optional</span>}</td>
                       <td>{!place ? <span className="no">No place set</span> : !e.must ? <span className="no">—</span> : bad.length ? <span className="bad">✗ You&apos;re in {S[DAY_INDEX[bad[0]]].place}</span> : <span className="yes">✓ You&apos;re there</span>}</td>
+                      <td>{canWrite && <button className="btn mrg">Edit</button>}</td>
                     </tr>
                   );
                 })}
@@ -448,6 +451,11 @@ export default function PlanApp({ calendar, role, people, initialDays, initialEv
             {canWrite && <span className={"meta plan__status--" + status.kind}>{status.text || "Changes save as you make them"}</span>}
             <button className="btn x" onClick={() => select(null)}>Done</button>
           </div>
+          {(() => {
+            const seen = new Set<string>(); const evs: PlanEvent[] = [];
+            for (const d of range.days) for (const e of evByDay[d] || []) if (!seen.has(e.id)) { seen.add(e.id); evs.push(e); }
+            return evs.length ? <div className="row"><span className="lbl">Events</span>{evs.map((e) => <button key={e.id} className={"evchip" + (range.days.some((d) => d >= e.start_day && d <= e.end_day && conflictDays.has(d)) ? " clash" : "")} onClick={() => setEvEdit(e)}>{evIcon(e)} {e.title} <i>{fmtRange(e.start_day, e.end_day)}</i></button>)}</div> : null;
+          })()}
           {canWrite && <>
             <div className="row">
               <span className="lbl">Who</span>
@@ -593,9 +601,10 @@ function DateBox({ value, min, max, disabled, onCommit, label }: { value: string
     onBlur={() => commit(v)} onKeyDown={(e) => { if (e.key === "Enter") commit(v); }} />;
 }
 
-function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick, write, places }: {
+function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick, write, places, evByDay, evIcon, conflictDays, onEvent }: {
   S: SDay[]; people: Person[]; pd: Map<string, PDay>; tog: Record<string, boolean[]>; person: string; setPerson: (id: string) => void; canWrite: boolean;
   onNote: (personId: string, days: string[], v: string) => void; onPick: (personId: string, a: string, b: string) => void; write: (c: Change[]) => void; places: { place: string; loc: Loc }[];
+  evByDay: Record<string, PlanEvent[]>; evIcon: (e: PlanEvent) => string; conflictDays: Set<string>; onEvent: (e: PlanEvent) => void;
 }) {
   const p = people.find((x) => x.id === person) || people[0];
   const [arm, setArm] = useState(false);
@@ -679,11 +688,11 @@ function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick
       </div>
       <div className="plan__tablewrap">
         <table className="plan__ranges">
-          <thead><tr><th>From</th><th>To</th><th>Days</th><th>Place</th><th>{p.is_self ? "Flights" : "With you"}</th><th>School holiday</th><th>Note</th><th></th></tr></thead>
+          <thead><tr><th>From</th><th>To</th><th>Days</th><th>Place</th><th>{p.is_self ? "Flights" : "With you"}</th><th>School holiday</th><th>Events</th><th>Note</th><th></th></tr></thead>
           <tbody>
             {canWrite && (
               <tr className="addrow addrow--who">
-                <td colSpan={8}>
+                <td colSpan={9}>
                   <span className="dcell">
                     <span className="lbl">New stay for</span>
                     {people.map((x) => { const on = x.id === p.id || nwExtra.has(x.id); return <button key={x.id} className={"layer" + (on ? " is-on" : "")} aria-pressed={on} disabled={x.id === p.id} title={x.id === p.id ? "The person whose stays you are viewing" : "Also add this stay for " + x.name} onClick={() => setNwExtra((o) => { const n = new Set(o); if (n.has(x.id)) n.delete(x.id); else n.add(x.id); return n; })}><i className="pdot" style={{ background: x.color }} />{x.name}</button>; })}
@@ -696,7 +705,7 @@ function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick
                 <td className="n"><input type="date" aria-label="New stay from" value={nw.a} min={DAYS[0]} max={DAYS[DAYS.length - 1]} onChange={(e) => setNw((o) => ({ ...o, a: e.target.value, b: !o.b || o.b < e.target.value ? e.target.value : o.b }))} /></td>
                 <td className="n"><input type="date" aria-label="New stay to" value={nw.b} min={nw.a || DAYS[0]} max={DAYS[DAYS.length - 1]} onChange={(e) => setNw((o) => ({ ...o, b: e.target.value }))} /></td>
                 <td className="n">{nwOk ? DAY_INDEX[nw.b] - DAY_INDEX[nw.a] + 1 : ""}</td>
-                <td colSpan={3}>
+                <td colSpan={4}>
                   <span className="dcell">
                     <input type="text" className="place" list="stay-places" aria-label="Place" placeholder="Place" value={nw.place} onChange={(e) => setPlace(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addStay(); }} />
                     <select aria-label="Country" value={nw.loc} onChange={(e) => setNw((o) => ({ ...o, loc: e.target.value as Loc | "" }))}>
@@ -709,7 +718,7 @@ function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick
                 <td><button className="btn btn--primary mrg" disabled={!nwOk} onClick={addStay}>＋ Add stay{nwFor.length > 1 ? ` for ${nwFor.length}` : ""}</button></td>
               </tr>
             )}
-            {rows.length === 0 && <tr><td colSpan={8} className="no">Nothing entered for {p.name} yet.{canWrite ? " Use the row above to add a stay." : ""}</td></tr>}
+            {rows.length === 0 && <tr><td colSpan={9} className="no">Nothing entered for {p.name} yet.{canWrite ? " Use the row above to add a stay." : ""}</td></tr>}
             {rows.map((r, i) => {
               const edit = canWrite && r.explicit;
               const dow = (d: string) => new Date(d + "T12:00:00").toLocaleDateString("en-GB", { weekday: "short" });
@@ -721,6 +730,15 @@ function Stays({ S, people, pd, tog, person, setPerson, canWrite, onNote, onPick
                   <td><span className="pill" style={{ background: r.loc ? LOC[r.loc].c : "#8a979e" }}>{r.place}</span>{!r.explicit ? <span className="meta"> home</span> : null}</td>
                   <td className="n">{p.is_self ? r.fl.join(" ") : r.tg === r.days.length ? <span className="yes">Yes</span> : r.tg ? `${r.tg} of ${r.days.length}` : <span className="no">—</span>}</td>
                   <td>{r.hol ? `★ ${r.hol === r.days.length ? "all" : r.hol}` : <span className="no">—</span>}</td>
+                  <td>{(() => {
+                    const seen = new Set<string>(); const evs: PlanEvent[] = [];
+                    for (const d of r.days) for (const e of evByDay[d] || []) if (!seen.has(e.id)) { seen.add(e.id); evs.push(e); }
+                    if (!evs.length) return <span className="no">—</span>;
+                    return evs.map((e) => {
+                      const clash = p.is_self && r.days.some((d) => d >= e.start_day && d <= e.end_day && conflictDays.has(d));
+                      return <button key={e.id} className={"evchip" + (clash ? " clash" : "")} title={`${e.title} · ${fmtRange(e.start_day, e.end_day)}${clash ? " · you're not there" : ""} (click to edit)`} onClick={() => onEvent(e)}>{evIcon(e)} {e.title} <i>{fmt(e.start_day).replace(/^\w+ /, "")}</i></button>;
+                    });
+                  })()}</td>
                   <td>{r.explicit ? <NoteInput key={r.a + r.notes.join("|")} value={r.notes.join(" · ")} disabled={!canWrite} placeholder="Add a note for these days" onCommit={(v) => onNote(p.id, r.days, v)} /> : null}</td>
                   <td className="n">{canWrite && <button className="btn mrg" onClick={() => onPick(p.id, r.a, r.b)}>{r.explicit ? "Change place" : "Change"}</button>}
                     {edit && (!p.is_self || rows.length > 1) && <button className="btn mrg" style={{ marginLeft: 6 }} onClick={() => del(i)}>{armRow === r.a ? (p.is_self ? `Click again: becomes ${delTarget(i)!.place}` : "Click again to delete") : "Delete"}</button>}</td>
