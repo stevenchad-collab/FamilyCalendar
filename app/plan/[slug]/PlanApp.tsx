@@ -388,6 +388,11 @@ export default function PlanApp({ calendar, role, people, initialDays, initialEv
           </div>
         </>}
 
+        {view === "time" && <div className="plan__legend">
+          {(Object.keys(LOC) as Loc[]).map((k) => <span key={k}><i className="sw" style={{ background: LOC[k].c }} />{LOC[k].name}</span>)}
+          <span><i className="sw" style={{ background: "var(--p-es)" }} />solid = in the same place as you</span>
+          <span><i className="sw" style={{ background: "color-mix(in srgb,var(--p-es) 22%,#fff)" }} />pale = somewhere you are not</span>
+        </div>}
         {view === "time" && <Timeline S={S} people={people} pd={pd} tog={tog} layers={layers} sortedEvents={sortedEvents} catMap={catMap} conflictDays={conflictDays}
           range={range} dayHandlers={dayHandlers} evIcon={evIcon} evColor={evColor}
           onSeg={(pid, a, b) => { select(a, b); setSelPeople(new Set([pid])); }} onEvent={(e) => setEvEdit(e)} />}
