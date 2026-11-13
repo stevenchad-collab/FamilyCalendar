@@ -89,12 +89,13 @@ export default async function Page({ params }: { params: { slug: string } }) {
   const { data: member } = await supabase.from("calendar_members").select("role").eq("calendar_id", cal.id).eq("user_id", user.id).maybeSingle();
   const role = (member?.role as "owner" | "editor" | "viewer" | undefined) || "viewer";
 
-  let { data: people, error: pErr } = await supabase.from("plan_people").select(PEOPLE_SELECT).eq("calendar_id", cal.id).order("sort");
+  const { data: people, error: pErr } = await supabase.from("plan_people").select(PEOPLE_SELECT).eq("calendar_id", cal.id).order("sort");
   if (pErr) return <Notice title="One step left" text="This version of the plan needs the database update in supabase/migrations/0004_plan_people_events.sql. Run it in the Supabase SQL Editor, then reload this page." />;
   if (!people || people.length === 0) {
     if (role !== "owner") return <Notice title="Plan is being upgraded" text="The owner needs to open this page once to finish the upgrade. Please check back shortly." />;
     await upgradeToPeople(createServiceClient(), cal.id, user.id);
-    people = (await supabase.from("plan_people").select(PEOPLE_SELECT).eq("calendar_id", cal.id).order("sort")).data;
+    // reload rather than re-query: an identical read in the same render is served from React's request cache (still empty)
+    redirect(`/plan/${cal.slug}`);
   }
 
   const [days, { data: evRows }, { data: calList }, { data: catRows }] = await Promise.all([
